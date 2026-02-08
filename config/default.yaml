@@ -1,0 +1,27 @@
+project:
+  name: "icio-exogenous-pass-through"
+
+icio:
+  extended: false              # use extended ICIO (China/Mex split)
+  year_range:
+    start: 1995
+    end: 2022
+
+sectors:
+  # Put the exact OECD industry codes you will treat as "exogenous".
+  exo_codes: ["B06", "C19"]
+
+lambda:
+  method: "uniform"           # "uniform" or "pca" later
+  normalize: true
+
+storage:
+  tables_format: "parquet"    # for tall tables
+  matrices_format: "npz"      # for arrays
+
+paths:
+  raw: "data/raw"
+  interim: "data/interim"
+  processed: "data/processed"
+  matrices: "data/matrices"
+  outputs: "outputs"

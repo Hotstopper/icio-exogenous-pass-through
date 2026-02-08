@@ -1,0 +1,32 @@
+﻿# --- Data (do not commit large / licensed datasets) ---
+data/raw/
+data/interim/
+data/processed/
+data/matrices/
+
+# --- Outputs (rebuildable) ---
+outputs/
+
+# --- Python artifacts ---
+__pycache__/
+*.py[cod]
+
+# --- Packaging metadata ---
+*.egg-info/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- Testing / tooling caches ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# --- OS / editor noise ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
