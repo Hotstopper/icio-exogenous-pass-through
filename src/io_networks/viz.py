@@ -194,11 +194,6 @@ def plot_country_bubble(
         import matplotlib.pyplot as plt
     except ImportError as exc:  # pragma: no cover
         raise ImportError("matplotlib is required for plotting. Install it in your .venv.") from exc
-    try:
-        from adjustText import adjust_text
-    except ImportError:
-        adjust_text = None
-
     work = df.copy()
     metric_label = _metric_label(metric)
     metric_values = pd.to_numeric(work[metric], errors="coerce")
@@ -208,7 +203,7 @@ def plot_country_bubble(
         & np.isfinite(metric_values.to_numpy(dtype=float))
         & np.isfinite(bubble_sizes.to_numpy(dtype=float))
     )
-    plot = work.loc[valid_mask].copy()
+    plot = work.loc[valid_mask].copy().reset_index(drop=True)
     if plot.empty:
         raise ValueError(f"No finite data available to plot for metric '{metric}'.")
 
@@ -217,43 +212,109 @@ def plot_country_bubble(
 
     ax.scatter(plot["x"], plot[metric], s=plot["bubble_size"], alpha=0.55)
 
-    # Label highest values for readability.
-    texts = []
+    # Label placement: keep text close to own bubble, avoid other bubbles and prior labels.
     if label_top_n > 0:
         top = plot.nlargest(min(label_top_n, len(plot)), metric)
+        ax.figure.canvas.draw()
+        renderer = ax.figure.canvas.get_renderer()
+        trans = ax.transData
+        axes_bbox = ax.get_window_extent(renderer=renderer)
+        px_per_pt = ax.figure.dpi / 72.0
+
+        x_all = plot["x"].to_numpy(dtype=float)
+        y_all = pd.to_numeric(plot[metric], errors="coerce").to_numpy(dtype=float)
+        s_all = pd.to_numeric(plot["bubble_size"], errors="coerce").to_numpy(dtype=float)
+        centers = trans.transform(np.column_stack([x_all, y_all]))
+        radii_px = np.sqrt(np.maximum(s_all, 0.0) / np.pi) * px_per_pt
+        placed_bboxes = []
+
+        def _rect_circle_overlap(rect, cx, cy, r):
+            x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
+            nx = np.clip(cx, x0, x1)
+            ny = np.clip(cy, y0, y1)
+            return (cx - nx) ** 2 + (cy - ny) ** 2 < r**2
+
+        angles_deg = [25, -25, 155, -155, 60, -60, 120, -120, 90, -90, 0, 180]
+        offset_factors = [0.75, 0.9, 1.05]
         for _, row in top.iterrows():
             label = row.get("sector_abbreviation")
             if pd.isna(label) or not str(label).strip():
                 label = row["sector_code"]
-            txt = ax.text(
-                float(row["x"]),
-                float(row[metric]),
+            bubble_size = float(row.get("bubble_size", 0.0))
+            bubble_radius_pt = np.sqrt(max(bubble_size, 0.0) / np.pi)
+            base_offset_pt = bubble_radius_pt + 0.5
+            row_idx = int(row.name)
+            best = None
+
+            for factor in offset_factors:
+                off = base_offset_pt * factor
+                for ang_deg in angles_deg:
+                    ang = np.deg2rad(ang_deg)
+                    dx = off * np.cos(ang)
+                    dy = off * np.sin(ang)
+                    ha = "left" if dx >= 0 else "right"
+                    va = "bottom" if dy >= 0 else "top"
+                    candidate = ax.annotate(
+                        str(label),
+                        xy=(float(row["x"]), float(row[metric])),
+                        xytext=(dx, dy),
+                        textcoords="offset points",
+                        fontsize=8,
+                        fontfamily="serif",
+                        ha=ha,
+                        va=va,
+                        clip_on=True,
+                        alpha=0.0,
+                    )
+                    bbox = candidate.get_window_extent(renderer=renderer).expanded(1.02, 1.08)
+                    candidate.remove()
+
+                    label_overlap = sum(1 for b in placed_bboxes if bbox.overlaps(b))
+                    bubble_overlap = 0.0
+                    for j, ((cx, cy), r) in enumerate(zip(centers, radii_px)):
+                        if _rect_circle_overlap(bbox, cx, cy, r):
+                            bubble_overlap += 0.5 if j == row_idx else 1.0
+                    outside = 0 if axes_bbox.contains(*bbox.get_points()[0]) and axes_bbox.contains(*bbox.get_points()[1]) else 1
+                    dist_penalty = np.hypot(dx, dy)
+                    cx_label = 0.5 * (bbox.x0 + bbox.x1)
+                    cy_label = 0.5 * (bbox.y0 + bbox.y1)
+                    own_cx, own_cy = centers[row_idx]
+                    own_dist = np.hypot(cx_label - own_cx, cy_label - own_cy)
+                    own_edge_gap = max(0.0, own_dist - radii_px[row_idx])
+                    target_gap = 4.0
+                    own_gap_penalty = abs(own_edge_gap - target_gap)
+                    other_dists = [
+                        np.hypot(cx_label - ocx, cy_label - ocy)
+                        for j, (ocx, ocy) in enumerate(centers)
+                        if j != row_idx
+                    ]
+                    nearest_other = min(other_dists) if other_dists else np.inf
+                    closer_to_other_penalty = max(0.0, own_dist - nearest_other)
+                    score = (
+                        4000 * outside
+                        + 800 * label_overlap
+                        + 220 * bubble_overlap
+                        + 12 * own_gap_penalty
+                        + 120 * closer_to_other_penalty
+                        + 0.8 * dist_penalty
+                    )
+
+                    if best is None or score < best[0]:
+                        best = (score, dx, dy, ha, va, bbox)
+
+            _, dx, dy, ha, va, bbox = best
+            final_txt = ax.annotate(
                 str(label),
+                xy=(float(row["x"]), float(row[metric])),
+                xytext=(dx, dy),
+                textcoords="offset points",
                 fontsize=8,
                 fontfamily="serif",
+                ha=ha,
+                va=va,
+                clip_on=True,
             )
-            texts.append(txt)
-        if adjust_text is not None and texts:
-            ax.figure.canvas.draw()
-            x_vals = plot["x"].to_numpy(dtype=float)
-            y_vals = pd.to_numeric(plot[metric], errors="coerce").to_numpy(dtype=float)
-            params = dict(
-                texts=texts,
-                x=x_vals,
-                y=y_vals,
-                ax=ax,
-                avoid_self=True,
-                ensure_inside_axes=True,
-                expand_axes=False,
-                only_move={"text": "xy", "static": "xy", "explode": "xy", "pull": "xy"},
-                expand_text=(1.02, 1.08),
-                expand_points=(1.05, 1.1),
-                force_text=0.12,
-                force_points=0.15,
-                max_move=(8, 8),
-                iter_lim=200,
-            )
-            adjust_text(**params)
+            placed_bboxes.append(final_txt.get_window_extent(renderer=renderer).expanded(1.02, 1.08))
 
     bucket_centers = plot.groupby("sector_bucket", as_index=False)["x"].mean()
     ax.set_xticks(bucket_centers["x"])
