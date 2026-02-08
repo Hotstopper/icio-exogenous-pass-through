@@ -1,0 +1,61 @@
+﻿sector_code,sector_name,sector_abbreviation
+A01,Agriculture and hunting,AGR
+A02,Forestry and logging,FOR
+A03,Fishing and aquaculture,FSH
+B05,Mining of coal and lignite,COA
+B06,Extraction of crude petroleum and natural gas,OIL
+B07,Mining of metal ores,ORE
+B08,Other mining and quarrying,QUA
+B09,Mining support service activities,MSS
+C10T12,Manufacture of food products; beverages and tobacco products,FOD
+C13T15,"Manufacture of textiles, wearing apparel, leather and related products",TEX
+C16,Manufacture of wood and of products of wood and cork,WOD
+C17_18,Manufacture of paper and paper products; Printing and reproduction of recorded media,PAP
+C19,Manufacture of coke and refined petroleum products,RPF
+C20,Manufacture of chemicals and chemical products,CHM
+C21,Manufacture of basic pharmaceutical products and pharmaceutical preparations,PHA
+C22,Manufacture of rubber and plastic products,RPL
+C23,Manufacture of other non-metallic mineral products,NMM
+C24A,Manufacture of basic iron and steel,STL
+C24B,Manufacture of basic precious and other non-ferrous metals,NFM
+C25,Manufacture of fabricated metal products,FMP
+C26,"Manufacture of computer, electronic and optical products",CEO
+C27,Manufacture of electrical equipment,ELE
+C28,Manufacture of machinery and equipment n.e.c. ,MAC
+C29,"Manufacture of motor vehicles, trailers and semi-trailers",MVT
+C301,Building of ships and boats,SHP
+C302T309,Manufacture of other transport equipment,TRN
+C31T33,Manufacture of furniture; other manufacturing; repair and installation of machinery and equipment,FUR
+D,"Electricity, gas, steam and air conditioning supply",UTL
+E,"Water supply; sewerage, waste management and remediation activities",WAT
+F,Construction,CON
+G,Wholesale and retail trade; repair of motor vehicles and motorcycles,TRD
+H49,Land transport and transport via pipelines,LND
+H50,Water transport,SEA
+H51,Air transport,AIR
+H52,Warehousing and support activities for transportation,WRH
+H53,Postal and courier activities,POS
+I,Accommodation and food service activities,HOS
+J58T60,"Publishing, Motion picture, video, television programme production and broadcasting activities",MED
+J61,Telecommunications,TEL
+J62_63,Computer programming and information service activities,ITS
+K,Financial and insurance activities,FIN
+L,Real estate activities,REA
+M,"Professional, scientific and technical activities",PST
+N,Administrative and support service activities,ADM
+O,Public administration and defence; compulsory social security,GOV
+P,Education,EDU
+Q,Human health and social work activities,HLT
+R,"Arts, entertainment and recreation activities",ART
+S,Other service activities,OSV
+T,Activities of households as employers; undifferentiated goods- and services-producing activities of households for own use,HOU
+Z,Intermediate use at basic prices,Z
+TLS,Taxes less subsidies on intermediate and final products ,TLS
+VA,Value added at basic prices,VA
+X,Output at basic prices,X
+HFCE,Household Final Consumption Expenditure,HFCE
+NPISH,Non-Profit Institutions Serving Households,NPISH
+GGFC,General Government Final Consumption,GGFC
+GFCF,Gross Fixed Capital Formation,GFCF
+INVNT,Changes in Inventories and Valuables,INVNT
+DPABR,Direct purchases abroad by residents,DPABR

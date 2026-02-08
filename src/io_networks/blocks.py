@@ -129,17 +129,19 @@ def build_blocks(cfg: dict[str, Any]) -> Path:
         m = sparse.eye(a_nn_sp.shape[0], format="csr") - a_nn_sp.transpose().tocsr()
 
         lam = _build_lambda(e_idx.size, cfg)
-        rhs = a_en.transpose() @ lam
+        tau_dir = np.asarray(a_en.transpose() @ lam, dtype=float)
 
         solve_success = True
         solve_note = "ok"
         try:
-            tau = spla.spsolve(m, rhs)
+            tau = spla.spsolve(m, tau_dir)
             tau = np.asarray(tau, dtype=float)
+            tau_amp = tau - tau_dir
         except Exception as exc:
             solve_success = False
             solve_note = str(exc)
             tau = np.full(n_idx.size, np.nan, dtype=float)
+            tau_amp = np.full(n_idx.size, np.nan, dtype=float)
 
         spectral_radius, spectral_method = _spectral_radius_estimate(a_nn_sp)
         cond_est = _condition_number_estimate(m)
@@ -150,6 +152,8 @@ def build_blocks(cfg: dict[str, Any]) -> Path:
             A_NN=a_nn,
             A_EN=a_en,
             tau=tau,
+            tau_dir=tau_dir,
+            tau_amp=tau_amp,
             idx_N=n_idx,
             idx_E=e_idx,
             lambda_E=lam,
@@ -184,6 +188,11 @@ def build_blocks(cfg: dict[str, Any]) -> Path:
                 "solve_note": solve_note,
                 "tau_nan_count": int(np.isnan(tau).sum()),
                 "tau_inf_count": int(np.isinf(tau).sum()),
+                "tau_dir_nan_count": int(np.isnan(tau_dir).sum()),
+                "tau_amp_nan_count": int(np.isnan(tau_amp).sum()),
+                "tau_mean": float(np.nanmean(tau)),
+                "tau_dir_mean": float(np.nanmean(tau_dir)),
+                "tau_amp_mean": float(np.nanmean(tau_amp)),
                 "spectral_radius_estimate": spectral_radius,
                 "spectral_radius_method": spectral_method,
                 "cond_estimate": cond_est,

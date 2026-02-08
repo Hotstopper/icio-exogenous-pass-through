@@ -13,7 +13,7 @@ sectors:
 
 lambda:
   method: "uniform"           # "uniform" or "pca" later
-  normalize: true
+  normalize: false
 
 storage:
   tables_format: "parquet"    # for tall tables
