@@ -1,8 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
+from io_networks.blocks import build_blocks
 from io_networks.config import load_config
 from io_networks.eda import run_eda
 from io_networks.matrices import build_yearly_a
@@ -17,6 +18,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     build_a = subparsers.add_parser("build-a", help="Build technical coefficient matrices A")
     build_a.add_argument("--config", type=Path, default=Path("config/default.yaml"))
+
+    build_blocks_cmd = subparsers.add_parser(
+        "build-blocks", help="Build E/N block matrices and tau from yearly A"
+    )
+    build_blocks_cmd.add_argument("--config", type=Path, default=Path("config/default.yaml"))
 
     return parser
 
@@ -35,6 +41,11 @@ def main() -> None:
     if args.command == "build-a":
         summary_file = build_yearly_a(cfg)
         print(f"A matrices summary written to: {summary_file}")
+        return
+
+    if args.command == "build-blocks":
+        summary_file = build_blocks(cfg)
+        print(f"Block matrices summary written to: {summary_file}")
         return
 
     parser.error(f"Unknown command: {args.command}")
