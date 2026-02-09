@@ -8,7 +8,7 @@ import pandas as pd
 
 from io_networks.paths import resolve_paths
 
-_ALLOWED_METRICS = {"tau", "tau_dir", "tau_amp"}
+_ALLOWED_METRICS = {"tau", "tau_dir", "tau_amp", "tau_amp2"}
 
 
 def _resolve_variant(cfg: dict[str, Any], variant: str | None) -> str:
@@ -71,6 +71,7 @@ def _metric_label(metric: str) -> str:
         "tau": r"$\tau$",
         "tau_dir": r"$\tau_{dir}$",
         "tau_amp": r"$\tau_{amp}$",
+        "tau_amp2": r"$\tau$ with $\tau_{amp}$ tails",
     }
     return labels.get(metric, metric)
 
@@ -109,10 +110,20 @@ def prepare_country_bubble_data(
         raise FileNotFoundError(f"Missing A metadata file: {a_meta}")
 
     arr = np.load(blocks_npz)
-    if metric not in arr.files:
-        raise ValueError(f"Metric {metric} not found in {blocks_npz.name}. Available: {arr.files}")
-
-    tau = arr[metric]
+    if metric == "tau_amp2":
+        required = {"tau", "tau_amp"}
+        missing = sorted(required.difference(set(arr.files)))
+        if missing:
+            raise ValueError(
+                f"Metric mode tau_amp2 requires arrays {sorted(required)} in {blocks_npz.name}. "
+                f"Missing: {missing}. Available: {arr.files}"
+            )
+        tau = arr["tau"]
+        tau_amp_tail = arr["tau_amp"]
+    else:
+        if metric not in arr.files:
+            raise ValueError(f"Metric {metric} not found in {blocks_npz.name}. Available: {arr.files}")
+        tau = arr[metric]
 
     meta = pd.read_parquet(blocks_meta)
     n_meta = meta[meta["group"] == "N"].sort_values("index_in_group").reset_index(drop=True)
@@ -122,6 +133,10 @@ def prepare_country_bubble_data(
         raise ValueError(
             f"Mismatch between labels ({len(labels_n)}) and {metric} length ({len(tau)}) for year {year}."
         )
+    if metric == "tau_amp2" and len(labels_n) != len(tau_amp_tail):
+        raise ValueError(
+            f"Mismatch between labels ({len(labels_n)}) and tau_amp length ({len(tau_amp_tail)}) for year {year}."
+        )
 
     df = pd.DataFrame(
         {
@@ -129,6 +144,8 @@ def prepare_country_bubble_data(
             metric: tau,
         }
     )
+    if metric == "tau_amp2":
+        df["tau_amp_tail"] = tau_amp_tail
     df["country_code"] = df["label"].map(_country_from_label)
     df["sector_code"] = df["label"].map(_sector_code_from_label)
 
@@ -189,6 +206,8 @@ def plot_country_bubble(
     """
     if metric not in df.columns:
         raise ValueError(f"metric column '{metric}' not in dataframe")
+    if metric == "tau_amp2" and "tau_amp_tail" not in df.columns:
+        raise ValueError("tau_amp2 mode requires 'tau_amp_tail' in dataframe.")
 
     try:
         import matplotlib.pyplot as plt
@@ -209,6 +228,20 @@ def plot_country_bubble(
 
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 6))
+
+    if metric == "tau_amp2":
+        tails = pd.to_numeric(plot["tau_amp_tail"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        y_top = pd.to_numeric(plot[metric], errors="coerce").to_numpy(dtype=float)
+        y_bottom = y_top - tails.to_numpy(dtype=float)
+        ax.vlines(
+            plot["x"].to_numpy(dtype=float),
+            y_bottom,
+            y_top,
+            colors="C0",
+            linewidth=1,
+            alpha=0.7,
+            zorder=1,
+        )
 
     ax.scatter(plot["x"], plot[metric], s=plot["bubble_size"], alpha=0.55)
 
