@@ -7,7 +7,8 @@ import pandas as pd
 
 from io_networks.paths import resolve_paths
 
-_ALLOWED_METRICS = {"xi", "xi_dir", "xi_amp"}
+_ALLOWED_METRICS = {"xi", "xi_dir", "xi_amp", "share"}
+_ALLOWED_RATIO_MODES = {"amplification", "share"}
 
 
 def _metric_label(metric: str) -> str:
@@ -15,6 +16,7 @@ def _metric_label(metric: str) -> str:
         "xi": r"$\xi$",
         "xi_dir": r"$\xi_{dir}$",
         "xi_amp": r"$\xi_{amp}$",
+        "share": r"$\xi_{amp} / \xi$",
     }
     return labels.get(metric, metric)
 
@@ -36,6 +38,270 @@ def load_xi_data(
     if not xi_path.exists():
         raise FileNotFoundError(f"Missing xi dataset: {xi_path}. Run build-xi first.")
     return pd.read_parquet(xi_path)
+
+
+def _ratio_label(ratio_mode: str) -> str:
+    labels = {
+        "amplification": r"$\xi / \xi_{dir}$",
+        "share": r"$\xi_{amp} / \xi$",
+    }
+    return labels.get(ratio_mode, ratio_mode)
+
+
+def _prepare_xi_ratio_frame(
+    df: pd.DataFrame,
+    ratio_mode: str,
+    only_ok: bool = True,
+) -> pd.DataFrame:
+    if ratio_mode not in _ALLOWED_RATIO_MODES:
+        raise ValueError(f"ratio_mode must be one of {sorted(_ALLOWED_RATIO_MODES)}")
+    required = {"country", "year", "xi", "xi_dir", "xi_amp"}
+    missing = sorted(required.difference(df.columns))
+    if missing:
+        raise ValueError(f"Missing required columns for ratio computation: {missing}")
+
+    work = df.copy()
+    work["country"] = work["country"].astype(str).str.upper()
+    work["year"] = pd.to_numeric(work["year"], errors="coerce")
+    work["xi"] = pd.to_numeric(work["xi"], errors="coerce")
+    work["xi_dir"] = pd.to_numeric(work["xi_dir"], errors="coerce")
+    work["xi_amp"] = pd.to_numeric(work["xi_amp"], errors="coerce")
+
+    if only_ok and "status" in work.columns:
+        work = work[work["status"] == "ok"].copy()
+
+    if ratio_mode == "amplification":
+        denom = work["xi_dir"].replace(0.0, np.nan)
+        work["ratio"] = work["xi"] / denom
+    else:
+        denom = work["xi"].replace(0.0, np.nan)
+        work["ratio"] = work["xi_amp"] / denom
+
+    work = work.dropna(subset=["country", "year", "xi", "ratio"]).copy()
+    work = work[np.isfinite(work["xi"]) & np.isfinite(work["ratio"])].copy()
+    return work
+
+
+def select_phase_map_countries(
+    df: pd.DataFrame,
+    ratio_mode: str = "share",
+    base_countries: Iterable[str] = ("USA", "CHN"),
+    only_ok: bool = True,
+) -> list[str]:
+    """Return placeholder countries: USA, CHN, median, q25, q75 by country-level ratio."""
+    work = _prepare_xi_ratio_frame(df=df, ratio_mode=ratio_mode, only_ok=only_ok)
+    if work.empty:
+        raise ValueError("No finite rows available for phase-map country selection.")
+
+    country_ratio = (
+        work.groupby("country", as_index=False)["ratio"]
+        .median()
+        .sort_values("country")
+        .reset_index(drop=True)
+    )
+    if country_ratio.empty:
+        raise ValueError("No country-level ratios available for selection.")
+
+    available = set(country_ratio["country"].tolist())
+    chosen: list[str] = []
+    for c in base_countries:
+        cu = str(c).upper()
+        if cu in available and cu not in chosen:
+            chosen.append(cu)
+
+    pool = country_ratio[~country_ratio["country"].isin(chosen)].copy()
+    if pool.empty:
+        return chosen
+
+    def _pick_nearest(target: float) -> str | None:
+        if pool.empty:
+            return None
+        idx = (pool["ratio"] - target).abs().idxmin()
+        return str(pool.loc[idx, "country"])
+
+    q25 = float(pool["ratio"].quantile(0.25))
+    q50 = float(pool["ratio"].quantile(0.50))
+    q75 = float(pool["ratio"].quantile(0.75))
+
+    for target in (q50, q25, q75):
+        picked = _pick_nearest(target)
+        if picked is not None and picked not in chosen:
+            chosen.append(picked)
+            pool = pool[pool["country"] != picked].copy()
+
+    return chosen[:5]
+
+
+def plot_xi_phase_map(
+    df: pd.DataFrame,
+    countries: Iterable[str],
+    ratio_mode: str = "share",
+    only_ok: bool = True,
+    title: str | None = None,
+    cmap: str = "viridis",
+    lw: float = 2.6,
+    point_size: float = 26.0,
+    show_end_labels: bool = True,
+    end_label_dx_pts: float = 10.0,
+    end_label_dy_pts: float = 8.0,
+    end_label_bbox_alpha: float = 0.8,
+    show_background: bool = True,
+    bg_color: str = "0.55",
+    bg_alpha: float = 0.12,
+    bg_lw: float = 0.9,
+    show_flow_arrows: bool = False,
+    flow_arrow_step: int = 4,
+    flow_arrow_lw: float = 1.0,
+    flow_arrow_scale: float = 11.0,
+    ax: Any = None,
+) -> Any:
+    """Plot time-colored country trajectories with x=xi and y=selected ratio."""
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.collections import LineCollection
+        from matplotlib.colors import Normalize
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("matplotlib is required for plotting. Install it in your .venv.") from exc
+
+    work = _prepare_xi_ratio_frame(df=df, ratio_mode=ratio_mode, only_ok=only_ok)
+    if work.empty:
+        raise ValueError("No finite rows available to plot phase map.")
+
+    wanted = []
+    seen = set()
+    for c in countries:
+        cu = str(c).upper()
+        if cu not in seen:
+            wanted.append(cu)
+            seen.add(cu)
+    if not wanted:
+        raise ValueError("Provide at least one country for phase map.")
+
+    plot = work[work["country"].isin(wanted)].copy()
+    if plot.empty:
+        raise ValueError("None of the requested countries are available in the filtered data.")
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(12, 8))
+
+    years_all = plot["year"].to_numpy(dtype=float)
+    norm = Normalize(vmin=float(np.nanmin(years_all)), vmax=float(np.nanmax(years_all)))
+    if hasattr(cmap, "__call__"):
+        cmap_obj = cmap
+    else:
+        cmap_obj = plt.get_cmap(cmap)
+
+    if show_background:
+        bg = work[~work["country"].isin(wanted)].copy()
+        for country in sorted(bg["country"].unique()):
+            sub = bg[bg["country"] == country].sort_values("year")
+            if len(sub) < 2:
+                continue
+            ax.plot(
+                sub["xi"].to_numpy(dtype=float),
+                sub["ratio"].to_numpy(dtype=float),
+                color=bg_color,
+                alpha=bg_alpha,
+                linewidth=bg_lw,
+                zorder=1,
+            )
+
+    for country in wanted:
+        sub = plot[plot["country"] == country].sort_values("year").copy()
+        if len(sub) == 0:
+            continue
+
+        x = sub["xi"].to_numpy(dtype=float)
+        y = sub["ratio"].to_numpy(dtype=float)
+        years = sub["year"].to_numpy(dtype=float)
+
+        if len(sub) >= 2:
+            pts = np.column_stack([x, y])
+            segs = np.stack([pts[:-1], pts[1:]], axis=1)
+            lc = LineCollection(segs, cmap=cmap_obj, norm=norm, linewidths=lw, alpha=0.95, zorder=3)
+            lc.set_array(years[1:])
+            ax.add_collection(lc)
+
+        ax.scatter(
+            x,
+            y,
+            c=years,
+            cmap=cmap_obj,
+            norm=norm,
+            s=point_size,
+            edgecolors="none",
+            alpha=0.95,
+            zorder=4,
+        )
+
+        if show_flow_arrows and len(sub) >= 2:
+            step = max(1, int(flow_arrow_step))
+            for i in range(step, len(sub), step):
+                x0, y0 = float(x[i - 1]), float(y[i - 1])
+                x1, y1 = float(x[i]), float(y[i])
+                if not (np.isfinite(x0) and np.isfinite(y0) and np.isfinite(x1) and np.isfinite(y1)):
+                    continue
+                if x0 == x1 and y0 == y1:
+                    continue
+                color = cmap_obj(norm(float(years[i])))
+                ax.annotate(
+                    "",
+                    xy=(x1, y1),
+                    xytext=(x0, y0),
+                    arrowprops={
+                        "arrowstyle": "->",
+                        "color": color,
+                        "lw": flow_arrow_lw,
+                        "mutation_scale": flow_arrow_scale,
+                        "alpha": 0.9,
+                    },
+                    zorder=5,
+                )
+
+        if show_end_labels:
+            dy = end_label_dy_pts
+            if len(sub) >= 2 and float(y[-1] - y[-2]) < 0:
+                dy = -end_label_dy_pts
+            ax.annotate(
+                country,
+                xy=(float(x[-1]), float(y[-1])),
+                xytext=(end_label_dx_pts, dy),
+                textcoords="offset points",
+                ha="left",
+                va="center",
+                fontsize=15,
+                fontfamily="serif",
+                bbox={
+                    "facecolor": "white",
+                    "edgecolor": "none",
+                    "alpha": end_label_bbox_alpha,
+                    "pad": 0.2,
+                },
+                zorder=6,
+            )
+
+    ax.autoscale()
+    ax.grid(alpha=0.25, linewidth=0.8)
+    ax.set_xlabel(_metric_label("xi"), fontfamily="serif")
+    ax.set_ylabel(_ratio_label(ratio_mode), fontfamily="serif")
+    if title:
+        ax.set_title(title, fontfamily="serif")
+    else:
+        ax.set_title(rf"Phase Map: {_ratio_label(ratio_mode)} vs $\xi$", fontfamily="serif")
+
+    for tick in ax.get_xticklabels():
+        tick.set_fontfamily("serif")
+    for tick in ax.get_yticklabels():
+        tick.set_fontfamily("serif")
+
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap_obj)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, pad=0.02)
+    cbar.set_label("Year", fontfamily="serif")
+    for tick in cbar.ax.get_yticklabels():
+        tick.set_fontfamily("serif")
+
+    return ax
 
 
 def plot_xi_country_lines(
@@ -60,7 +326,11 @@ def plot_xi_country_lines(
     """Plot country xi lines with gray background and highlighted countries."""
     if metric not in _ALLOWED_METRICS:
         raise ValueError(f"metric must be one of {sorted(_ALLOWED_METRICS)}")
-    required_cols = {"country", "year", metric}
+    required_cols = {"country", "year"}
+    if metric == "share":
+        required_cols.update({"xi", "xi_amp"})
+    else:
+        required_cols.add(metric)
     missing = sorted(required_cols.difference(df.columns))
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
@@ -74,7 +344,13 @@ def plot_xi_country_lines(
     work = df.copy()
     work["country"] = work["country"].astype(str).str.upper()
     work["year"] = pd.to_numeric(work["year"], errors="coerce")
-    work[metric] = pd.to_numeric(work[metric], errors="coerce")
+    if metric == "share":
+        work["xi"] = pd.to_numeric(work["xi"], errors="coerce")
+        work["xi_amp"] = pd.to_numeric(work["xi_amp"], errors="coerce")
+        denom = work["xi"].replace(0.0, np.nan)
+        work["share"] = work["xi_amp"] / denom
+    else:
+        work[metric] = pd.to_numeric(work[metric], errors="coerce")
 
     if only_ok and "status" in work.columns:
         work = work[work["status"] == "ok"].copy()
