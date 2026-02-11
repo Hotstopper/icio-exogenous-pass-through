@@ -11,6 +11,56 @@ from io_networks.paths import resolve_paths
 _ALLOWED_METRICS = {"tau", "tau_dir", "tau_amp", "tau_amp2"}
 
 
+def _load_tau_arrays(
+    blocks_npz: Path,
+    blocks_meta: Path,
+    metric: str,
+) -> tuple[pd.DataFrame, str, np.ndarray, np.ndarray | None]:
+    if metric not in _ALLOWED_METRICS:
+        raise ValueError(f"metric must be one of {sorted(_ALLOWED_METRICS)}")
+    if not blocks_npz.exists() or not blocks_meta.exists():
+        raise FileNotFoundError(
+            f"Missing blocks files in {blocks_npz.parent} for year {blocks_npz.stem.replace('blocks_', '')}. "
+            "Run build-blocks first."
+        )
+
+    arr = np.load(blocks_npz)
+    if metric == "tau_amp2":
+        required = {"tau", "tau_amp"}
+        missing = sorted(required.difference(set(arr.files)))
+        if missing:
+            raise ValueError(
+                f"Metric mode tau_amp2 requires arrays {sorted(required)} in {blocks_npz.name}. "
+                f"Missing: {missing}. Available: {arr.files}"
+            )
+        metric_col = "tau"
+        tau_values = arr[metric_col]
+        tau_amp_tail = arr["tau_amp"]
+    else:
+        if metric not in arr.files:
+            raise ValueError(f"Metric {metric} not found in {blocks_npz.name}. Available: {arr.files}")
+        metric_col = metric
+        tau_values = arr[metric_col]
+        tau_amp_tail = None
+
+    meta = pd.read_parquet(blocks_meta)
+    n_meta = meta[meta["group"] == "N"].sort_values("index_in_group").reset_index(drop=True)
+    labels_n = n_meta["label"].astype(str).tolist()
+
+    if len(labels_n) != len(tau_values):
+        raise ValueError(
+            f"Mismatch between labels ({len(labels_n)}) and {metric_col} length ({len(tau_values)}) "
+            f"for {blocks_npz.stem}."
+        )
+    if tau_amp_tail is not None and len(labels_n) != len(tau_amp_tail):
+        raise ValueError(
+            f"Mismatch between labels ({len(labels_n)}) and tau_amp length ({len(tau_amp_tail)}) "
+            f"for {blocks_npz.stem}."
+        )
+
+    return n_meta, metric_col, tau_values, tau_amp_tail
+
+
 def _resolve_variant(cfg: dict[str, Any], variant: str | None) -> str:
     if variant:
         return variant
@@ -76,6 +126,30 @@ def _metric_label(metric: str) -> str:
     return labels.get(metric, metric)
 
 
+def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
+    if len(values) == 0:
+        return float("nan")
+    if len(values) != len(weights):
+        raise ValueError("values and weights must have the same length")
+    if not (0.0 <= q <= 1.0):
+        raise ValueError("q must be in [0, 1]")
+
+    v = np.asarray(values, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    mask = np.isfinite(v) & np.isfinite(w) & (w > 0)
+    v = v[mask]
+    w = w[mask]
+    if len(v) == 0:
+        return float("nan")
+
+    order = np.argsort(v)
+    v = v[order]
+    w = w[order]
+    cdf = np.cumsum(w) - 0.5 * w
+    cdf = cdf / np.sum(w)
+    return float(np.interp(q, cdf, v))
+
+
 def prepare_country_bubble_data(
     cfg: dict[str, Any],
     country: str,
@@ -87,9 +161,6 @@ def prepare_country_bubble_data(
 
     Bubble size uses sector output (OUT) from A metadata as a GDP proxy.
     """
-    if metric not in _ALLOWED_METRICS:
-        raise ValueError(f"metric must be one of {sorted(_ALLOWED_METRICS)}")
-
     country = country.upper()
     use_variant = _resolve_variant(cfg, variant)
     paths = resolve_paths(cfg)
@@ -102,49 +173,19 @@ def prepare_country_bubble_data(
     blocks_meta = blocks_dir / f"blocks_{year}_meta.parquet"
     a_meta = a_dir / f"A_{year}_meta.parquet"
 
-    if not blocks_npz.exists() or not blocks_meta.exists():
-        raise FileNotFoundError(
-            f"Missing blocks files for {year} in {blocks_dir}. Run build-blocks first."
-        )
     if not a_meta.exists():
         raise FileNotFoundError(f"Missing A metadata file: {a_meta}")
 
-    arr = np.load(blocks_npz)
-    if metric == "tau_amp2":
-        required = {"tau", "tau_amp"}
-        missing = sorted(required.difference(set(arr.files)))
-        if missing:
-            raise ValueError(
-                f"Metric mode tau_amp2 requires arrays {sorted(required)} in {blocks_npz.name}. "
-                f"Missing: {missing}. Available: {arr.files}"
-            )
-        tau = arr["tau"]
-        tau_amp_tail = arr["tau_amp"]
-    else:
-        if metric not in arr.files:
-            raise ValueError(f"Metric {metric} not found in {blocks_npz.name}. Available: {arr.files}")
-        tau = arr[metric]
-
-    meta = pd.read_parquet(blocks_meta)
-    n_meta = meta[meta["group"] == "N"].sort_values("index_in_group").reset_index(drop=True)
+    n_meta, metric_col, tau_values, tau_amp_tail = _load_tau_arrays(blocks_npz, blocks_meta, metric)
     labels_n = n_meta["label"].astype(str).tolist()
-
-    if len(labels_n) != len(tau):
-        raise ValueError(
-            f"Mismatch between labels ({len(labels_n)}) and {metric} length ({len(tau)}) for year {year}."
-        )
-    if metric == "tau_amp2" and len(labels_n) != len(tau_amp_tail):
-        raise ValueError(
-            f"Mismatch between labels ({len(labels_n)}) and tau_amp length ({len(tau_amp_tail)}) for year {year}."
-        )
 
     df = pd.DataFrame(
         {
             "label": labels_n,
-            metric: tau,
+            metric: tau_values,
         }
     )
-    if metric == "tau_amp2":
+    if tau_amp_tail is not None:
         df["tau_amp_tail"] = tau_amp_tail
     df["country_code"] = df["label"].map(_country_from_label)
     df["sector_code"] = df["label"].map(_sector_code_from_label)
@@ -189,6 +230,86 @@ def prepare_country_bubble_data(
     df["year"] = int(year)
     df["variant"] = use_variant
     df["metric"] = metric
+
+    return df.drop(columns=["_bucket_order"])
+
+
+def prepare_all_countries_bubble_data(
+    cfg: dict[str, Any],
+    year: int,
+    metric: str = "tau",
+    variant: str | None = None,
+    bubble_size: float = 18.0,
+) -> pd.DataFrame:
+    """Return all-country non-exogenous rows for year-level tau bubble plotting.
+
+    Bubble size is constant to avoid GDP-size clutter when plotting all countries.
+    """
+    use_variant = _resolve_variant(cfg, variant)
+    paths = resolve_paths(cfg)
+
+    blocks_dir = paths["matrices"] / "blocks" / use_variant
+    a_dir = paths["matrices"] / "A" / use_variant
+    ref_dir = Path("data/reference")
+
+    blocks_npz = blocks_dir / f"blocks_{year}.npz"
+    blocks_meta = blocks_dir / f"blocks_{year}_meta.parquet"
+    a_meta = a_dir / f"A_{year}_meta.parquet"
+
+    n_meta, metric_col, tau_values, tau_amp_tail = _load_tau_arrays(blocks_npz, blocks_meta, metric)
+
+    df = n_meta[["label"]].copy()
+    df[metric] = tau_values
+    if tau_amp_tail is not None:
+        df["tau_amp_tail"] = tau_amp_tail
+
+    df["country_code"] = df["label"].map(_country_from_label)
+    df["sector_code"] = df["label"].map(_sector_code_from_label)
+
+    sector_ref = _load_sector_reference(ref_dir / "sector_codes.csv")
+    country_ref = _load_reference_table(ref_dir / "country_codes.csv", "country_code", "country_name")
+
+    if not sector_ref.empty:
+        df = df.merge(sector_ref, on="sector_code", how="left")
+    else:
+        df["sector_name"] = pd.NA
+        df["sector_abbreviation"] = pd.NA
+
+    if not country_ref.empty:
+        df = df.merge(country_ref, on="country_code", how="left")
+    else:
+        df["country_name"] = pd.NA
+
+    if a_meta.exists():
+        a_meta_df = pd.read_parquet(a_meta)[["sector", "out"]].rename(
+            columns={"sector": "label", "out": "out_proxy"}
+        )
+        df = df.merge(a_meta_df, on="label", how="left")
+        df["out_proxy"] = pd.to_numeric(df["out_proxy"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    else:
+        df["out_proxy"] = 0.0
+
+    df["sector_bucket"] = df["sector_code"].map(_sector_bucket)
+    bucket_order = {"Agriculture": 0, "Manufacturing": 1, "Services": 2, "Other": 3}
+    df["_bucket_order"] = df["sector_bucket"].map(bucket_order).fillna(99).astype(int)
+    df = df.sort_values(["_bucket_order", "sector_code", "country_code", "label"]).reset_index(drop=True)
+
+    sector_positions = (
+        df[["sector_code", "_bucket_order"]]
+        .drop_duplicates()
+        .sort_values(["_bucket_order", "sector_code"])
+        .reset_index(drop=True)
+    )
+    sector_positions["x_base"] = np.arange(len(sector_positions), dtype=float)
+    df = df.merge(sector_positions[["sector_code", "x_base"]], on="sector_code", how="left")
+
+    df["x"] = df["x_base"]
+    df["bubble_size_norm"] = 0.0
+    df["bubble_size"] = float(bubble_size)
+    df["year"] = int(year)
+    df["variant"] = use_variant
+    df["metric"] = metric
+    df["metric_col"] = metric_col
 
     return df.drop(columns=["_bucket_order"])
 
@@ -370,6 +491,495 @@ def plot_country_bubble(
             country_name = country
         year = int(work["year"].iloc[0]) if len(work) else 0
         ax.set_title(f"{country_name} {year}: {metric_label}", fontfamily="serif")
+
+    for tick in ax.get_yticklabels():
+        tick.set_fontfamily("serif")
+
+    return ax
+
+
+def plot_all_countries_bubble(
+    df: pd.DataFrame,
+    metric: str,
+    title: str | None = None,
+    alpha: float = 0.22,
+    jitter: float = 0.18,
+    ax: Any = None,
+) -> Any:
+    """Plot all-country tau bubbles with constant, small, transparent markers."""
+    if metric not in df.columns:
+        raise ValueError(f"metric column '{metric}' not in dataframe")
+
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("matplotlib is required for plotting. Install it in your .venv.") from exc
+
+    work = df.copy()
+    metric_values = pd.to_numeric(work[metric], errors="coerce")
+    x_values = pd.to_numeric(work.get("x"), errors="coerce")
+    bubble_sizes = pd.to_numeric(work.get("bubble_size", 18.0), errors="coerce").fillna(18.0)
+    valid_mask = (
+        np.isfinite(x_values.to_numpy(dtype=float))
+        & np.isfinite(metric_values.to_numpy(dtype=float))
+        & np.isfinite(bubble_sizes.to_numpy(dtype=float))
+    )
+    plot = work.loc[valid_mask].copy().reset_index(drop=True)
+    if plot.empty:
+        raise ValueError(f"No finite data available to plot for metric '{metric}'.")
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(14, 7))
+
+    if jitter > 0:
+        stable_order = plot["country_code"].fillna("").astype(str).sort_values().unique().tolist()
+        if len(stable_order) <= 1:
+            offsets = {stable_order[0]: 0.0} if stable_order else {}
+        else:
+            offsets = {
+                code: float(np.linspace(-jitter, jitter, len(stable_order))[i])
+                for i, code in enumerate(stable_order)
+            }
+        plot["x_plot"] = plot["x"].to_numpy(dtype=float) + plot["country_code"].map(offsets).fillna(0.0)
+    else:
+        plot["x_plot"] = plot["x"].to_numpy(dtype=float)
+
+    ax.scatter(
+        plot["x_plot"],
+        plot[metric],
+        s=plot["bubble_size"],
+        alpha=float(alpha),
+        color="C0",
+        linewidths=0,
+    )
+
+    bucket_centers = plot.groupby("sector_bucket", as_index=False)["x"].mean()
+    ax.set_xticks(bucket_centers["x"])
+    ax.set_xticklabels(bucket_centers["sector_bucket"], fontfamily="serif", fontsize=12)
+
+    for bucket in ["Agriculture", "Manufacturing", "Services", "Other"]:
+        sub = plot[plot["sector_bucket"] == bucket]
+        if len(sub) == 0:
+            continue
+        ax.axvline(float(sub["x"].max()) + 0.5, linestyle="--", linewidth=1, alpha=0.45)
+
+    metric_label = _metric_label(metric)
+    ax.set_xlabel("")
+    ax.set_ylabel(metric_label, fontfamily="serif", fontsize=14)
+    if title:
+        ax.set_title(title, fontfamily="serif", fontsize=17)
+    else:
+        year = int(plot["year"].iloc[0]) if len(plot) else 0
+        ax.set_title(f"All countries {year}: {metric_label}", fontfamily="serif", fontsize=17)
+
+    for tick in ax.get_yticklabels():
+        tick.set_fontfamily("serif")
+
+    return ax
+
+
+def plot_all_countries_boxen(
+    df: pd.DataFrame,
+    metric: str,
+    title: str | None = None,
+    group_col: str = "sector_code",
+    bucket_col: str = "sector_bucket",
+    mark_buckets: bool = True,
+    yscale: str = "linear",
+    flip_axes: bool = False,
+    metric_clip_quantiles: tuple[float, float] | None = None,
+    metric_decimals: int = 6,
+    weighted: bool = False,
+    weight_col: str = "out_proxy",
+    fit_median_regression: bool = False,
+    report_r2: bool = True,
+    regression_color: str = "#b22222",
+    show_points: bool = True,
+    point_alpha: float = 0.08,
+    point_size: float = 6.0,
+    ax: Any = None,
+) -> Any:
+    """Plot all-country metric distributions by group (boxen-style)."""
+    if metric not in df.columns:
+        raise ValueError(f"metric column '{metric}' not in dataframe")
+    if group_col not in df.columns:
+        raise ValueError(f"group column '{group_col}' not in dataframe")
+    if weighted and weight_col not in df.columns:
+        raise ValueError(f"weight column '{weight_col}' not in dataframe")
+
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.ticker import FuncFormatter
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("matplotlib is required for plotting. Install it in your .venv.") from exc
+
+    work = df.copy()
+    metric_values = pd.to_numeric(work[metric], errors="coerce")
+    valid_mask = np.isfinite(metric_values.to_numpy(dtype=float))
+    if yscale == "log":
+        valid_mask &= (metric_values.to_numpy(dtype=float) > 0.0)
+    valid_mask &= work[group_col].notna().to_numpy(dtype=bool)
+    if weighted:
+        weights = pd.to_numeric(work[weight_col], errors="coerce").to_numpy(dtype=float)
+        valid_mask &= np.isfinite(weights) & (weights > 0.0)
+    plot = work.loc[valid_mask].copy().reset_index(drop=True)
+    if plot.empty:
+        raise ValueError(f"No finite data available to plot for metric '{metric}'.")
+
+    if "x_base" in plot.columns:
+        order_df = (
+            plot[[group_col, "x_base", bucket_col]]
+            .drop_duplicates(subset=[group_col])
+            .sort_values(["x_base", group_col])
+        )
+        order = order_df[group_col].astype(str).tolist()
+    else:
+        order = sorted(plot[group_col].astype(str).dropna().unique().tolist())
+    if not order:
+        raise ValueError(f"No recognized values available in '{group_col}' for plotting.")
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(14, 7))
+
+    used_seaborn = False
+    median_positions: list[float] = []
+    median_values: list[float] = []
+    if not weighted:
+        try:
+            import seaborn as sns
+
+            sns.boxenplot(
+                data=plot,
+                x=metric if flip_axes else group_col,
+                y=group_col if flip_axes else metric,
+                order=order,
+                ax=ax,
+                color="C0",
+                linewidth=1.0,
+                k_depth="proportion",
+            )
+            if show_points:
+                sns.stripplot(
+                    data=plot,
+                    x=metric if flip_axes else group_col,
+                    y=group_col if flip_axes else metric,
+                    order=order,
+                    ax=ax,
+                    color="0.25",
+                    alpha=float(point_alpha),
+                    size=float(point_size),
+                    jitter=0.24,
+                )
+            used_seaborn = True
+        except ImportError:
+            pass
+
+    if weighted:
+        stats = []
+        for grp in order:
+            sub = plot.loc[plot[group_col].astype(str) == grp]
+            vals = pd.to_numeric(sub[metric], errors="coerce").to_numpy(dtype=float)
+            w = pd.to_numeric(sub[weight_col], errors="coerce").to_numpy(dtype=float)
+            mask = np.isfinite(vals) & np.isfinite(w) & (w > 0)
+            vals = vals[mask]
+            w = w[mask]
+            if len(vals) == 0:
+                continue
+            q10 = _weighted_quantile(vals, w, 0.10)
+            q25 = _weighted_quantile(vals, w, 0.25)
+            q50 = _weighted_quantile(vals, w, 0.50)
+            q75 = _weighted_quantile(vals, w, 0.75)
+            q90 = _weighted_quantile(vals, w, 0.90)
+            stats.append(
+                {
+                    "label": str(grp),
+                    "whislo": float(q10),
+                    "q1": float(q25),
+                    "med": float(q50),
+                    "q3": float(q75),
+                    "whishi": float(q90),
+                    "fliers": [],
+                }
+            )
+            median_positions.append(float(len(stats) - 1))
+            median_values.append(float(q50))
+
+        if not stats:
+            raise ValueError(f"No non-empty weighted groups available to plot for metric '{metric}'.")
+
+        positions = np.arange(len(stats), dtype=float)
+        ax.bxp(
+            stats,
+            positions=positions,
+            widths=0.6,
+            showfliers=False,
+            vert=not flip_axes,
+            patch_artist=True,
+            boxprops={"facecolor": "#8eb8e5", "alpha": 0.65, "edgecolor": "C0"},
+            medianprops={"color": "#1f2a44", "linewidth": 1.6},
+            whiskerprops={"color": "C0", "linewidth": 1.0},
+            capprops={"color": "C0", "linewidth": 1.0},
+        )
+        if flip_axes:
+            ax.set_yticks(positions)
+            ax.set_yticklabels([s["label"] for s in stats], fontfamily="serif", fontsize=12)
+        else:
+            ax.set_xticks(positions)
+            ax.set_xticklabels([s["label"] for s in stats], fontfamily="serif", fontsize=12)
+
+        if show_points:
+            rng = np.random.default_rng(0)
+            for i, grp in enumerate([s["label"] for s in stats]):
+                vals = (
+                    pd.to_numeric(plot.loc[plot[group_col].astype(str) == grp, metric], errors="coerce")
+                    .dropna()
+                    .to_numpy(dtype=float)
+                )
+                if len(vals) == 0:
+                    continue
+                if flip_axes:
+                    y = i + rng.uniform(-0.12, 0.12, size=len(vals))
+                    ax.scatter(
+                        vals,
+                        y,
+                        s=float(point_size) ** 2,
+                        alpha=float(point_alpha),
+                        color="0.2",
+                        linewidths=0,
+                        zorder=1,
+                    )
+                else:
+                    x = i + rng.uniform(-0.12, 0.12, size=len(vals))
+                    ax.scatter(
+                        x,
+                        vals,
+                        s=float(point_size) ** 2,
+                        alpha=float(point_alpha),
+                        color="0.2",
+                        linewidths=0,
+                        zorder=1,
+                    )
+    elif not used_seaborn:
+        grouped = [
+            pd.to_numeric(plot.loc[plot[group_col].astype(str) == bucket, metric], errors="coerce")
+            .dropna()
+            .to_numpy(dtype=float)
+            for bucket in order
+        ]
+        grouped = [g for g in grouped if len(g) > 0]
+        if not grouped:
+            raise ValueError(f"No non-empty groups available to plot for metric '{metric}'.")
+
+        positions = np.arange(len(grouped), dtype=float)
+        ax.boxplot(
+            grouped,
+            positions=positions,
+            widths=0.6,
+            vert=not flip_axes,
+            patch_artist=True,
+            boxprops={"facecolor": "#8eb8e5", "alpha": 0.65, "edgecolor": "C0"},
+            medianprops={"color": "#1f2a44", "linewidth": 1.4},
+            whiskerprops={"color": "C0", "linewidth": 1.0},
+            capprops={"color": "C0", "linewidth": 1.0},
+            flierprops={"marker": "o", "markersize": 2.5, "alpha": 0.15, "markeredgewidth": 0},
+        )
+        if flip_axes:
+            ax.set_yticks(positions)
+            ax.set_yticklabels(order, fontfamily="serif", fontsize=12)
+        else:
+            ax.set_xticks(positions)
+            ax.set_xticklabels(order, fontfamily="serif", fontsize=12)
+
+        if show_points:
+            rng = np.random.default_rng(0)
+            for i, grp in enumerate(order):
+                vals = (
+                    pd.to_numeric(plot.loc[plot[group_col].astype(str) == grp, metric], errors="coerce")
+                    .dropna()
+                    .to_numpy(dtype=float)
+                )
+                if len(vals) == 0:
+                    continue
+                x = i + rng.uniform(-0.12, 0.12, size=len(vals))
+                if flip_axes:
+                    y = i + rng.uniform(-0.12, 0.12, size=len(vals))
+                    ax.scatter(
+                        vals,
+                        y,
+                        s=float(point_size) ** 2,
+                        alpha=float(point_alpha),
+                        color="0.2",
+                        linewidths=0,
+                        zorder=1,
+                    )
+                else:
+                    ax.scatter(
+                        x,
+                        vals,
+                        s=float(point_size) ** 2,
+                        alpha=float(point_alpha),
+                        color="0.2",
+                        linewidths=0,
+                        zorder=1,
+                    )
+        median_positions = [float(i) for i in range(len(order))]
+        median_values = [
+            float(
+                pd.to_numeric(
+                    plot.loc[plot[group_col].astype(str) == grp, metric],
+                    errors="coerce",
+                ).median()
+            )
+            for grp in order
+        ]
+    else:
+        median_positions = [float(i) for i in range(len(order))]
+        median_values = [
+            float(
+                pd.to_numeric(
+                    plot.loc[plot[group_col].astype(str) == grp, metric],
+                    errors="coerce",
+                ).median()
+            )
+            for grp in order
+        ]
+
+    metric_label = _metric_label(metric)
+    if flip_axes:
+        ax.set_xlabel(metric_label, fontfamily="serif", fontsize=14)
+        ax.set_ylabel("")
+        ax.set_xscale(yscale)
+        if group_col in {"sector_code", "sector_abbreviation"}:
+            for tick in ax.get_yticklabels():
+                tick.set_fontfamily("serif")
+                tick.set_fontsize(9)
+    else:
+        ax.set_xlabel("")
+        ax.set_ylabel(metric_label, fontfamily="serif", fontsize=14)
+        ax.set_yscale(yscale)
+        if group_col in {"sector_code", "sector_abbreviation"}:
+            ax.tick_params(axis="x", labelrotation=90)
+            for tick in ax.get_xticklabels():
+                tick.set_fontfamily("serif")
+                tick.set_fontsize(9)
+
+    def _plain_number(x: float, _pos: int) -> str:
+        text = f"{x:.{int(metric_decimals)}f}"
+        text = text.rstrip("0").rstrip(".")
+        return "0" if text in {"-0", ""} else text
+
+    if flip_axes:
+        ax.xaxis.set_major_formatter(FuncFormatter(_plain_number))
+    else:
+        ax.yaxis.set_major_formatter(FuncFormatter(_plain_number))
+
+    if metric_clip_quantiles is not None:
+        q_lo, q_hi = metric_clip_quantiles
+        q_lo = float(q_lo)
+        q_hi = float(q_hi)
+        if not (0.0 <= q_lo < q_hi <= 1.0):
+            raise ValueError("metric_clip_quantiles must satisfy 0 <= q_lo < q_hi <= 1.")
+        clip_vals = pd.to_numeric(plot[metric], errors="coerce").to_numpy(dtype=float)
+        clip_vals = clip_vals[np.isfinite(clip_vals)]
+        if yscale == "log":
+            clip_vals = clip_vals[clip_vals > 0.0]
+        if len(clip_vals) > 0:
+            lo = float(np.quantile(clip_vals, q_lo))
+            hi = float(np.quantile(clip_vals, q_hi))
+            if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                if flip_axes:
+                    ax.set_xlim(lo, hi)
+                else:
+                    ax.set_ylim(lo, hi)
+
+    if mark_buckets and bucket_col in plot.columns:
+        order_df = (
+            plot[[group_col, bucket_col] + (["x_base"] if "x_base" in plot.columns else [])]
+            .dropna(subset=[group_col, bucket_col])
+            .drop_duplicates(subset=[group_col])
+        )
+        if "x_base" in order_df.columns:
+            order_df = order_df.sort_values(["x_base", group_col]).reset_index(drop=True)
+        else:
+            order_df[group_col] = order_df[group_col].astype(str)
+            order_df = order_df.sort_values([group_col]).reset_index(drop=True)
+
+        buckets = order_df[bucket_col].astype(str).tolist()
+        start = 0
+        segments: list[tuple[str, int, int]] = []
+        for i in range(1, len(buckets) + 1):
+            if i == len(buckets) or buckets[i] != buckets[i - 1]:
+                segments.append((buckets[start], start, i - 1))
+                start = i
+
+        for _, _, end in segments[:-1]:
+            if flip_axes:
+                ax.axhline(float(end) + 0.5, linestyle=":", linewidth=1.0, alpha=0.8, color="0.35")
+            else:
+                ax.axvline(float(end) + 0.5, linestyle=":", linewidth=1.0, alpha=0.8, color="0.35")
+
+    # Optional trendline along group medians and corresponding R^2.
+    med_pos = np.asarray(median_positions, dtype=float)
+    med_val = np.asarray(median_values, dtype=float)
+    med_mask = np.isfinite(med_pos) & np.isfinite(med_val)
+    med_pos = med_pos[med_mask]
+    med_val = med_val[med_mask]
+    r2 = float("nan")
+    if fit_median_regression and len(med_pos) >= 2:
+        if yscale == "log":
+            transform_mask = med_val > 0
+            med_pos_fit = med_pos[transform_mask]
+            med_val_fit = med_val[transform_mask]
+            if len(med_pos_fit) >= 2:
+                y_fit = np.log10(med_val_fit)
+                coefs = np.polyfit(med_pos_fit, y_fit, 1)
+                y_hat = np.polyval(coefs, med_pos_fit)
+                ss_res = float(np.sum((y_fit - y_hat) ** 2))
+                ss_tot = float(np.sum((y_fit - np.mean(y_fit)) ** 2))
+                r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
+                med_grid = np.linspace(med_pos_fit.min(), med_pos_fit.max(), 200)
+                pred = 10.0 ** np.polyval(coefs, med_grid)
+                if flip_axes:
+                    ax.plot(pred, med_grid, color=regression_color, linewidth=1.8, zorder=4)
+                else:
+                    ax.plot(med_grid, pred, color=regression_color, linewidth=1.8, zorder=4)
+        else:
+            coefs = np.polyfit(med_pos, med_val, 1)
+            y_hat = np.polyval(coefs, med_pos)
+            ss_res = float(np.sum((med_val - y_hat) ** 2))
+            ss_tot = float(np.sum((med_val - np.mean(med_val)) ** 2))
+            r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
+            med_grid = np.linspace(med_pos.min(), med_pos.max(), 200)
+            pred = np.polyval(coefs, med_grid)
+            if flip_axes:
+                ax.plot(pred, med_grid, color=regression_color, linewidth=1.8, zorder=4)
+            else:
+                ax.plot(med_grid, pred, color=regression_color, linewidth=1.8, zorder=4)
+
+    ax._median_regression_r2 = r2
+    if report_r2 and np.isfinite(r2):
+        ax.text(
+            0.99,
+            0.98,
+            f"$R^2={r2:.3f}$",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=10,
+            fontfamily="serif",
+            color=regression_color,
+        )
+
+    if title:
+        ax.set_title(title, fontfamily="serif", fontsize=17)
+    else:
+        year = int(plot["year"].iloc[0]) if len(plot) and "year" in plot.columns else 0
+        flavor = "Boxen" if used_seaborn else "Box"
+        ax.set_title(
+            f"All countries {year}: {metric_label} by {group_col} ({flavor})",
+            fontfamily="serif",
+            fontsize=17,
+        )
 
     for tick in ax.get_yticklabels():
         tick.set_fontfamily("serif")

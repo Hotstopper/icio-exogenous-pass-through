@@ -51,6 +51,7 @@ Visualization helpers in `src/io_networks/viz.py` and `src/io_networks/viz_xi.py
 │     └─ sector_codes.csv
 ├─ notebooks/
 │  ├─ tau_bubble_chart.ipynb
+│  ├─ tau_bubble_all_countries.ipynb
 │  ├─ xi_line_chart.ipynb
 │  └─ xi_phase_map.ipynb
 ├─ outputs/
@@ -178,6 +179,24 @@ Supports metrics:
 - `tau_dir`
 - `tau_amp`
 - `tau_amp2` (with `tau_amp` tails)
+
+### `notebooks/tau_bubble_all_countries.ipynb`
+
+Uses:
+- `prepare_all_countries_bubble_data(...)`
+- `plot_all_countries_bubble(...)`
+- `plot_all_countries_boxen(...)`
+
+Supports metrics:
+- `tau`
+- `tau_dir`
+- `tau_amp`
+- `tau_amp2`
+
+Design notes:
+- boxen-style distribution view by sector (recommended),
+- optional light point overlay for raw dispersion context,
+- all-country bubble view remains available when needed.
 
 ### `notebooks/xi_line_chart.ipynb`
 
