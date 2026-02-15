@@ -1,0 +1,110 @@
+oecd_activity,icio_sector_code,stage,map_type,notes
+A01,A01,detail,exact,
+_T,A01,total_fallback,fallback,used when detail/group missing
+A02,A02,detail,exact,
+_T,A02,total_fallback,fallback,used when detail/group missing
+A03,A03,detail,exact,
+_T,A03,total_fallback,fallback,used when detail/group missing
+B05,B05,detail,exact,
+B05_06,B05,group_fallback,fallback,used when detail missing
+_T,B05,total_fallback,fallback,used when detail/group missing
+B06,B06,detail,exact,
+B05_06,B06,group_fallback,fallback,used when detail missing
+_T,B06,total_fallback,fallback,used when detail/group missing
+B07,B07,detail,exact,
+B07_08,B07,group_fallback,fallback,used when detail missing
+_T,B07,total_fallback,fallback,used when detail/group missing
+B08,B08,detail,exact,
+B07_08,B08,group_fallback,fallback,used when detail missing
+_T,B08,total_fallback,fallback,used when detail/group missing
+B09,B09,detail,exact,
+_T,B09,total_fallback,fallback,used when detail/group missing
+C10T12,C10T12,detail,exact,
+_T,C10T12,total_fallback,fallback,used when detail/group missing
+C13T15,C13T15,detail,exact,
+_T,C13T15,total_fallback,fallback,used when detail/group missing
+C16,C16,detail,exact,
+_T,C16,total_fallback,fallback,used when detail/group missing
+C17,C17_18,detail,many_to_one,
+C18,C17_18,detail,many_to_one,
+C16T18,C17_18,group_fallback,fallback,used when detail missing
+_T,C17_18,total_fallback,fallback,used when detail/group missing
+C19,C19,detail,exact,
+_T,C19,total_fallback,fallback,used when detail/group missing
+C20,C20,detail,exact,
+_T,C20,total_fallback,fallback,used when detail/group missing
+C21,C21,detail,exact,
+_T,C21,total_fallback,fallback,used when detail/group missing
+C22,C22,detail,exact,
+_T,C22,total_fallback,fallback,used when detail/group missing
+C23,C23,detail,exact,
+_T,C23,total_fallback,fallback,used when detail/group missing
+C241_2431,C24A,detail,one_to_one_alias,
+C24,C24A,group_fallback,fallback,used when detail missing
+_T,C24A,total_fallback,fallback,used when detail/group missing
+C242_2432,C24B,detail,one_to_one_alias,
+C24,C24B,group_fallback,fallback,used when detail missing
+_T,C24B,total_fallback,fallback,used when detail/group missing
+C25,C25,detail,exact,
+_T,C25,total_fallback,fallback,used when detail/group missing
+C26,C26,detail,exact,
+_T,C26,total_fallback,fallback,used when detail/group missing
+C27,C27,detail,exact,
+_T,C27,total_fallback,fallback,used when detail/group missing
+C28,C28,detail,exact,
+_T,C28,total_fallback,fallback,used when detail/group missing
+C29,C29,detail,exact,
+_T,C29,total_fallback,fallback,used when detail/group missing
+C301,C301,detail,exact,
+_T,C301,total_fallback,fallback,used when detail/group missing
+C302_309,C302T309,detail,one_to_one_alias,
+C30,C302T309,group_fallback,fallback,used when detail missing
+_T,C302T309,total_fallback,fallback,used when detail/group missing
+C31T33,C31T33,detail,exact,
+_T,C31T33,total_fallback,fallback,used when detail/group missing
+D,D,detail,exact,
+_T,D,total_fallback,fallback,used when detail/group missing
+E,E,detail,exact,
+_T,E,total_fallback,fallback,used when detail/group missing
+F,F,detail,exact,
+_T,F,total_fallback,fallback,used when detail/group missing
+G,G,detail,exact,
+_T,G,total_fallback,fallback,used when detail/group missing
+H49,H49,detail,exact,
+_T,H49,total_fallback,fallback,used when detail/group missing
+H50,H50,detail,exact,
+_T,H50,total_fallback,fallback,used when detail/group missing
+H51,H51,detail,exact,
+_T,H51,total_fallback,fallback,used when detail/group missing
+H52,H52,detail,exact,
+_T,H52,total_fallback,fallback,used when detail/group missing
+H53,H53,detail,exact,
+_T,H53,total_fallback,fallback,used when detail/group missing
+I,I,detail,exact,
+_T,I,total_fallback,fallback,used when detail/group missing
+J58T60,J58T60,detail,exact,
+_T,J58T60,total_fallback,fallback,used when detail/group missing
+J61,J61,detail,exact,
+_T,J61,total_fallback,fallback,used when detail/group missing
+J62_63,J62_63,detail,exact,
+_T,J62_63,total_fallback,fallback,used when detail/group missing
+K,K,detail,exact,
+_T,K,total_fallback,fallback,used when detail/group missing
+L,L,detail,exact,
+_T,L,total_fallback,fallback,used when detail/group missing
+M,M,detail,exact,
+_T,M,total_fallback,fallback,used when detail/group missing
+N,N,detail,exact,
+_T,N,total_fallback,fallback,used when detail/group missing
+O,O,detail,exact,
+_T,O,total_fallback,fallback,used when detail/group missing
+P,P,detail,exact,
+_T,P,total_fallback,fallback,used when detail/group missing
+Q,Q,detail,exact,
+_T,Q,total_fallback,fallback,used when detail/group missing
+R,R,detail,exact,
+_T,R,total_fallback,fallback,used when detail/group missing
+S,S,detail,exact,
+_T,S,total_fallback,fallback,used when detail/group missing
+T,T,detail,exact,
+_T,T,total_fallback,fallback,used when detail/group missing
