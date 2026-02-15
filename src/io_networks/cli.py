@@ -4,6 +4,8 @@ import argparse
 from pathlib import Path
 
 from io_networks.blocks import build_blocks
+from io_networks.c import build_c
+from io_networks.c_diff import build_c_diff
 from io_networks.config import load_config
 from io_networks.eda import run_eda
 from io_networks.matrices import build_yearly_a
@@ -29,6 +31,17 @@ def build_parser() -> argparse.ArgumentParser:
         "build-xi", help="Build country-year xi metrics from tau and HFCE weights"
     )
     build_xi_cmd.add_argument("--config", type=Path, default=Path("config/default.yaml"))
+
+    build_c_cmd = subparsers.add_parser(
+        "build-c", help="Build country-year c metrics from c_N and HFCE weights"
+    )
+    build_c_cmd.add_argument("--config", type=Path, default=Path("config/default.yaml"))
+
+    build_c_diff_cmd = subparsers.add_parser(
+        "build-c-diff",
+        help="Build country-year c_diff metrics from (c_N - c_gdp_N) and HFCE weights",
+    )
+    build_c_diff_cmd.add_argument("--config", type=Path, default=Path("config/default.yaml"))
 
     return parser
 
@@ -57,6 +70,16 @@ def main() -> None:
     if args.command == "build-xi":
         output_file = build_xi(cfg)
         print(f"Xi output written to: {output_file}")
+        return
+
+    if args.command == "build-c":
+        output_file = build_c(cfg)
+        print(f"C output written to: {output_file}")
+        return
+
+    if args.command == "build-c-diff":
+        output_file = build_c_diff(cfg)
+        print(f"C diff output written to: {output_file}")
         return
 
     parser.error(f"Unknown command: {args.command}")
