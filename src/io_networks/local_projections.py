@@ -52,6 +52,7 @@ def load_generic_control(
     name: str,
     value_column: str,
     merge_keys: list[str] | None = None,
+    merge_key_columns: dict[str, str] | None = None,
     country_column: str = "country",
     year_column: str = "year",
     status_column: str | None = "status",
@@ -59,9 +60,11 @@ def load_generic_control(
 ) -> pd.DataFrame:
     if merge_keys is None:
         merge_keys = ["country", "year"]
+    key_column_map = dict(merge_key_columns or {})
 
     raw = _read_table(path)
-    required = set(merge_keys) | {value_column}
+    required_keys = {key_column_map.get(key, country_column if key == "country" else year_column if key == "year" else key) for key in merge_keys}
+    required = required_keys | {value_column}
     if status_column is not None:
         required.add(status_column)
     missing = required - set(raw.columns)
@@ -69,11 +72,19 @@ def load_generic_control(
         raise ValueError(f"Control '{name}' is missing columns: {sorted(missing)}")
 
     out = raw.copy()
+    if value_column != name and name in out.columns and name not in merge_keys:
+        out = out.drop(columns=[name])
     rename_map: dict[str, str] = {}
     if "country" in merge_keys:
-        rename_map[country_column] = "country"
+        rename_map[key_column_map.get("country", country_column)] = "country"
     if "year" in merge_keys:
-        rename_map[year_column] = "year"
+        rename_map[key_column_map.get("year", year_column)] = "year"
+    for key in merge_keys:
+        if key in {"country", "year"}:
+            continue
+        source_col = key_column_map.get(key, key)
+        if source_col != key:
+            rename_map[source_col] = key
     rename_map[value_column] = name
     out = out.rename(columns=rename_map)
 
@@ -138,6 +149,7 @@ def build_panel_lp_dataset(
             name=control_name,
             value_column=spec.get("value_column", control_name),
             merge_keys=list(spec.get("merge_keys", ["country", "year"])),
+            merge_key_columns=spec.get("merge_key_columns"),
             country_column=spec.get("country_column", "country"),
             year_column=spec.get("year_column", "year"),
             status_column=spec.get("status_column", "status"),
