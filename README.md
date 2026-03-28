@@ -1,81 +1,31 @@
-﻿# io-networks
+# io-networks
 
-Dissertation pipeline for OECD ICIO input-output network analysis.
+Dissertation pipeline for OECD ICIO input-output network analysis, country-level aggregation, and downstream econometric work.
 
-This repository builds:
-- quality checks for yearly ICIO tables,
-- yearly technical-coefficient matrices `A`,
-- exogenous/non-exogenous block objects and `tau` decomposition,
-- country-year `xi` metrics (including directional and amplification parts),
-- notebook-ready visualizations for `tau` and `xi`.
+## Overview
 
-## What This Repo Does
+This repository does three connected jobs:
 
-The workflow is organized as a reproducible pipeline:
-1. `eda`: validates raw ICIO yearly files and writes diagnostics.
-2. `build-a`: builds yearly technical coefficient matrices `A = Z / x`.
-3. `build-blocks`: partitions sectors into exogenous (`E`) and non-exogenous (`N`) sets, then computes:
-   - `A_NN`
-   - `A_EN`
-   - `tau_dir`
-   - `tau_amp`
-   - `tau = tau_dir + tau_amp`
-4. `build-xi`: aggregates sector-level `tau` objects to country-year `xi` using HFCE weights:
-   - `xi`
-   - `xi_dir`
-   - `xi_amp`
-   - identity residual `xi - (xi_dir + xi_amp)`
+1. Builds yearly ICIO-derived matrix objects from OECD input-output tables.
+2. Aggregates sector-level objects into country-year measures such as `xi`, `c`, and `c_diff`.
+3. Supports OLS and panel local projection analysis using those derived measures plus CPI, oil, and other controls.
 
-Visualization helpers in `src/io_networks/viz.py` and `src/io_networks/viz_xi.py` support:
-- sector bubble charts for `tau` variants,
-- country line charts for `xi`, `xi_dir`, `xi_amp`, and `share = xi_amp / xi`,
-- phase maps with time-colored trajectories, ratio modes, background countries, and flow arrows.
-
-## Repository Structure
+At a high level, the workflow is:
 
 ```text
-.
-├─ config/
-│  └─ default.yaml
-├─ data/
-│  ├─ raw/
-│  │  ├─ regular/
-│  │  └─ extended/
-│  ├─ matrices/
-│  │  ├─ A/
-│  │  └─ blocks/
-│  ├─ processed/
-│  │  └─ xi/
-│  └─ reference/
-│     ├─ country_codes.csv
-│     └─ sector_codes.csv
-├─ notebooks/
-│  ├─ tau_bubble_chart.ipynb
-│  ├─ tau_bubble_all_countries.ipynb
-│  ├─ xi_line_chart.ipynb
-│  └─ xi_phase_map.ipynb
-├─ outputs/
-│  └─ eda/
-├─ src/io_networks/
-│  ├─ cli.py
-│  ├─ eda.py
-│  ├─ matrices.py
-│  ├─ blocks.py
-│  ├─ xi.py
-│  ├─ viz.py
-│  └─ viz_xi.py
-└─ pyproject.toml
+raw ICIO tables
+-> technical coefficients A
+-> exogenous / non-exogenous block decomposition
+-> country-year aggregates (xi, c, c_diff)
+-> econometric panels and notebooks
 ```
-
-## Requirements
-
-- Python 3.11+
-- Core dependencies are managed in `pyproject.toml`:
-  - `numpy`, `pandas`, `pyarrow`, `scipy`, `statsmodels`, `pyyaml`, `matplotlib`, `adjustText`
 
 ## Installation
 
-From repository root:
+Requirements:
+- Python 3.11+
+
+Install from the repository root:
 
 ```powershell
 python -m venv .venv
@@ -84,167 +34,331 @@ python -m pip install -U pip
 python -m pip install -e .
 ```
 
-Optional dev tools:
+Optional development dependencies:
 
 ```powershell
 python -m pip install -e ".[dev]"
 ```
 
+Declared runtime dependencies include:
+- `numpy`
+- `pandas`
+- `pyarrow`
+- `scipy`
+- `statsmodels`
+- `pyyaml`
+- `matplotlib`
+- `adjustText`
+
+The package CLI entrypoint is:
+
+```powershell
+io-net
+```
+
+implemented by `io_networks.cli:main`.
+
+## Repository Layout
+
+```text
+.
+|- config/
+|  `- default.yaml
+|- data/
+|  |- processed/
+|  |  |- c/
+|  |  |- c_diff/
+|  |  |- cpi/
+|  |  |- exchange_rates/
+|  |  |- oil/
+|  |  `- xi/
+|  `- reference/
+|- notebooks/
+|- outputs/
+|- src/io_networks/
+|  |- blocks.py
+|  |- c.py
+|  |- c_diff.py
+|  |- cli.py
+|  |- config.py
+|  |- eda.py
+|  |- local_projections.py
+|  |- logging.py
+|  |- matrices.py
+|  |- paths.py
+|  |- regression.py
+|  |- viz.py
+|  |- viz_xi.py
+|  `- xi.py
+|- tests/
+|- local_projections.py
+|- regression.py
+`- pyproject.toml
+```
+
+Top-level shims:
+- `local_projections.py` re-exports `src/io_networks/local_projections.py` for notebook-friendly imports.
+- `regression.py` re-exports `src/io_networks/regression.py`.
+
 ## Configuration
 
-Main config: `config/default.yaml`
+Main config file:
 
-Important fields:
-- `icio.extended`: switch between `data/raw/regular` and `data/raw/extended`
-- `icio.year_range.start`, `icio.year_range.end`: analysis window (default `1995` to `2022`)
-- `sectors.exo_codes`: exogenous OECD sector codes (default `["B06", "C19"]`)
-- `lambda.method`: currently `uniform`
-- `lambda.normalize`: whether to normalize `lambda` to sum to 1
-- `paths`: raw/interim/processed/matrices/outputs roots
+```text
+config/default.yaml
+```
 
-## CLI Commands
+Important settings:
+- `icio.extended`: switch between `regular` and `extended` ICIO variants
+- `icio.year_range.start`, `icio.year_range.end`: years to process
+- `sectors.exo_codes`: OECD sector codes treated as exogenous
+- `lambda.method`: weighting method for the exogenous block
+- `lambda.normalize`: whether to normalize exogenous weights
+- `paths.raw`, `paths.interim`, `paths.processed`, `paths.matrices`, `paths.outputs`: root directories used by the pipeline
 
-Entrypoint script:
+The default project name is `icio-exogenous-pass-through`.
+
+## Main Pipeline
+
+The build pipeline is exposed through:
 
 ```powershell
 io-net --help
 ```
 
-Commands:
+Core commands:
 
 ```powershell
 io-net eda --config config/default.yaml
 io-net build-a --config config/default.yaml
 io-net build-blocks --config config/default.yaml
 io-net build-xi --config config/default.yaml
+io-net build-c --config config/default.yaml
+io-net build-c-diff --config config/default.yaml
 ```
 
-Typical run order:
+Recommended order:
+
 1. `io-net eda`
 2. `io-net build-a`
 3. `io-net build-blocks`
 4. `io-net build-xi`
+5. `io-net build-c`
+6. `io-net build-c-diff`
 
-## Pipeline Outputs
+## Build Outputs
 
-### 1) EDA (`outputs/eda`)
+### `eda`
 
-- `summary_by_year.csv`: row/column counts, duplicate/null/zero diagnostics, schema consistency flags.
-- `check_results.csv`: pass/fail checks by year.
-- `issues.csv`: failed checks and missing-year issues.
+Validates the yearly raw ICIO files and writes diagnostics under `outputs/eda`.
 
-### 2) A Matrices (`data/matrices/A/<variant>`)
+Typical outputs:
+- `summary_by_year.csv`
+- `check_results.csv`
+- `issues.csv`
 
-Per year:
-- `A_<year>.npz` with array `A`
-- `A_<year>_meta.parquet` with sector labels, `OUT`, and `zero_out`
+### `build-a`
 
-Aggregate:
+Builds yearly technical coefficient matrices `A = Z / x`.
+
+Outputs under `data/matrices/A/<variant>`:
+- `A_<year>.npz`
+- `A_<year>_meta.parquet`
 - `build_summary.csv`
 
-### 3) Block Objects (`data/matrices/blocks/<variant>`)
+Notes:
+- columns with effectively zero gross output are zeroed out in `A`
+- the summary includes matrix diagnostics and metadata file names
 
-Per year:
-- `blocks_<year>.npz` containing:
-  - `A_NN`, `A_EN`
-  - `tau`, `tau_dir`, `tau_amp`
-  - `idx_N`, `idx_E`
-  - `lambda_E`
-- `blocks_<year>_meta.parquet` with N/E labels and index mappings
+### `build-blocks`
 
-Aggregate:
-- `blocks_summary.csv` (solver diagnostics, spectral radius estimate, condition estimate, means, NaN counts)
+Splits sectors into exogenous (`E`) and non-exogenous (`N`) groups, then computes the block objects used by the decomposition.
 
-### 4) Xi Outputs (`data/processed/xi/<variant>`)
+Outputs under `data/matrices/blocks/<variant>`:
+- `blocks_<year>.npz`
+- `blocks_<year>_meta.parquet`
+- `blocks_summary.csv`
+- `country_c_<year>.parquet`
+- `country_c_gdp_<year>.parquet`
 
-- `xi_by_country_year.parquet`:
-  - `year`, `country`, `xi`, `xi_dir`, `xi_amp`, `identity_residual`, status fields
-- `weights_diagnostics.parquet`:
-  - HFCE availability, normalization stats, clipped negatives
-- `weights_by_country_sector.parquet`:
-  - raw/normalized weights and contribution decomposition
-- `xi_summary.csv`:
-  - yearly aggregate diagnostics
-
-## Notebooks
-
-### `notebooks/tau_bubble_chart.ipynb`
-
-Uses:
-- `prepare_country_bubble_data(...)`
-- `plot_country_bubble(...)`
-
-Supports metrics:
+Stored arrays include:
+- `A_NN`
+- `A_EN`
 - `tau`
 - `tau_dir`
 - `tau_amp`
-- `tau_amp2` (with `tau_amp` tails)
+- `lambda_E`
+- `v_over_out_N`
+- `pct_change_v_N`
+- `c_N`
+- `gdp_growth_N`
+- `c_gdp_N`
+- index arrays such as `idx_N` and `idx_E`
 
-### `notebooks/tau_bubble_all_countries.ipynb`
+### `build-xi`
 
-Uses:
-- `prepare_all_countries_bubble_data(...)`
-- `plot_all_countries_bubble(...)`
-- `plot_all_countries_boxen(...)`
+Aggregates sector-level `tau` objects to country-year `xi` measures using HFCE weights.
 
-Supports metrics:
-- `tau`
-- `tau_dir`
-- `tau_amp`
-- `tau_amp2`
+Outputs under `data/processed/xi/<variant>`:
+- `xi_by_country_year.parquet`
+- `weights_diagnostics.parquet`
+- `weights_by_country_sector.parquet`
+- `xi_summary.csv`
 
-Design notes:
-- boxen-style distribution view by sector (recommended),
-- optional light point overlay for raw dispersion context,
-- all-country bubble view remains available when needed.
-
-### `notebooks/xi_line_chart.ipynb`
-
-Uses:
-- `load_xi_data(...)`
-- `plot_xi_country_lines(...)`
-
-Supports line metrics:
+Important output fields include:
+- `country`
+- `year`
 - `xi`
 - `xi_dir`
 - `xi_amp`
-- `share = xi_amp / xi`
+- `identity_residual`
+- `status`
+- build timestamp and git commit metadata
 
-Common controls:
-- highlighted vs background countries,
-- `linear` / `log` / `symlog` y-scales,
-- endpoint labels and reserved label space,
-- serif typography.
+Possible `status` values include `ok`, `missing_hfce_column`, and `zero_hfce_mass`.
 
-### `notebooks/xi_phase_map.ipynb`
+### `build-c`
 
-Uses:
-- `select_phase_map_countries(...)`
-- `plot_xi_phase_map(...)`
+Aggregates `c_N` to country-year `c` using HFCE weights.
 
-Phase-map design:
-- x-axis: `xi`
-- y-axis ratio mode:
-  - amplification: `xi / xi_dir`
-  - share: `xi_amp / xi`
-- time-colored trajectory (configurable colormap, including truncated `Oranges`)
-- optional grayscale background countries
-- optional flow arrows
-- configurable temporal downsampling (e.g., every 3 or 5 years)
-- optional axis clipping (e.g., `x in [0.01, 0.1]`, share `y in [0.4, 1.0]`)
+Outputs under `data/processed/c/<variant>`:
+- `c_by_country_year.parquet`
+- `weights_diagnostics.parquet`
+- `weights_by_country_sector.parquet`
+- `c_summary.csv`
 
-## Method Notes
+Possible `status` values include `ok`, `missing_hfce_column`, `zero_hfce_mass`, and `missing_c_vector`.
 
-- `build-a` sets a whole column of `A` to zero when `OUT <= 1e-12` for that sector-year.
-- `build-blocks` currently supports uniform `lambda` over exogenous sectors.
-- `build-xi` clips negative HFCE weights to zero before normalization.
-- `xi` identity is tracked explicitly through `identity_residual`.
+### `build-c-diff`
+
+Aggregates `(c_N - c_gdp_N)` to country-year `c_diff` using HFCE weights.
+
+Outputs under `data/processed/c_diff/<variant>`:
+- `c_diff_by_country_year.parquet`
+- `weights_diagnostics.parquet`
+- `weights_by_country_sector.parquet`
+- `c_diff_summary.csv`
+
+Possible `status` values include `ok`, `missing_hfce_column`, `zero_hfce_mass`, and `missing_c_diff_vector`.
+
+## Regression Workflow
+
+`src/io_networks/regression.py` provides utilities to:
+- load `xi`, `c`, `c_diff`, CPI, and oil series
+- merge them into econometric panels
+- estimate OLS specifications with optional country fixed effects
+- save merged data, coefficient tables, summary text, and model metrics
+
+Default input locations:
+- `xi`: `data/processed/xi/regular/xi_by_country_year.parquet`
+- `c`: `data/processed/c/regular/c_by_country_year.parquet`
+- `c_diff`: `data/processed/c_diff/regular/c_diff_by_country_year.parquet`
+- CPI: `data/processed/cpi/annual_cpi.csv`
+- oil: chosen by CPI frequency from `annual_oil.csv`, `quarterly_oil.csv`, or `monthly_oil.csv`
+
+Supported CPI and oil frequencies:
+- annual: `A`
+- quarterly: `Q`
+- monthly: `M`
+
+Supported regressands:
+- `cpi`
+- `cpi_minus_xi_x_oil`
+- `cpi_minus_c`
+- `cpi_minus_xi_x_oil_c`
+- `cpi_minus_xi_x_oil_c_diff`
+- `cpi_on_xi_x_oil_and_c_diff`
+
+CLI usage:
+
+```powershell
+python -m io_networks.regression --help
+```
+
+Useful flags:
+- `--xi-path`
+- `--c-path`
+- `--c-diff-path`
+- `--cpi-path`
+- `--cpi-freq`
+- `--oil-path`
+- `--cpi-lags`
+- `--include-country-fe` / `--no-country-fe`
+- `--regressand`
+- `--exclude-argentina`
+- `--out-dir`
+
+Default regression outputs are written under `outputs/regression`:
+- merged regression data
+- coefficient table
+- text summary
+- model metrics CSV
+
+## Panel Local Projections
+
+`src/io_networks/local_projections.py` supports:
+- building panel LP datasets from `xi`, CPI, oil, and optional controls
+- annual and quarterly panels
+- horizon-by-horizon local projections with country and year or time fixed effects
+- clustered-by-country or `HC3` inference
+- cumulative quarterly CPI targets
+- horizon-0 comparisons against the OLS implementation
+- impulse-response plotting
+
+Key public helpers include:
+- `build_panel_lp_dataset(...)`
+- `panel_diagnostics(...)`
+- `build_cumulative_targets(...)`
+- `fit_panel_local_projections(...)`
+- `fit_cumulative_panel_local_projections(...)`
+- `compare_horizon0_to_run_ols(...)`
+- `plot_irf(...)`
+
+The LP dataset builder now supports generic controls with:
+- custom merge keys
+- custom source column names via `merge_key_columns`
+- optional sample restriction using `required_for_sample`
+
+That is what powers the quarterly exchange-rate control in the notebooks, where:
+- source file: `data/processed/exchange_rates/quarterly_exchange_rates.csv`
+- source value column: `log_diff`
+- merged control name inside LP panels: `exchange_rate`
+
+## Notebooks
+
+The `notebooks/` directory mixes visualization, exploratory work, and econometric workflows.
+
+Current notebooks include:
+- `naive_ols.ipynb`
+- `naive_ols_2.ipynb`
+- `lagged_xi_oil_cpi_minus_c_diff_ols.ipynb`
+- `panel_local_projections.ipynb`
+- `panel_cumulative_local_projections.ipynb`
+- `tau_bubble_chart.ipynb`
+- `tau_bubble_all_countries.ipynb`
+- `xi_line_chart.ipynb`
+- `xi_phase_map.ipynb`
+- `oecd_stan.ipynb`
+
+Current LP notebook conventions:
+- both panel LP notebooks use quarterly CPI and quarterly oil
+- optional controls are defined through `panel_controls`
+- controls that enter the regression are listed separately in `regression_controls`
+- the current quarterly exchange-rate control is merged from `quarterly_exchange_rates.csv` and used as `exchange_rate`
+
+Visualization helpers live mainly in:
+- `src/io_networks/viz.py`
+- `src/io_networks/viz_xi.py`
+
+These support:
+- single-country `tau` bubble charts
+- all-country bubble and boxen comparisons
+- xi line charts
+- xi phase-map style plots
 
 ## Testing and Linting
 
-`pyproject.toml` is configured for:
-- `pytest` (`tests` path)
-- `ruff` (line length 100, rules `E`, `F`, `I`)
+The repository is configured for `pytest` and `ruff`.
 
 Run:
 
@@ -253,23 +367,20 @@ pytest
 ruff check .
 ```
 
-Note: there may be no test files yet under `tests/`.
+Current automated LP coverage includes:
+- optional control merges
+- control-based sample restriction
+- quarterly panel support
+- automatic use of `time_index` in quarterly LPs
+- horizon coverage in fitted LP models
+- horizon-0 equivalence between LP and OLS in the compatible setup
+- synthetic checks around identity mismatch and common-sample behavior
 
 ## Troubleshooting
 
-- `FileNotFoundError` on blocks/A/xi paths:
-  - run upstream pipeline steps first (`build-a` -> `build-blocks` -> `build-xi`).
-- `build-xi` missing HFCE columns:
-  - output rows are marked with non-`ok` status; inspect `weights_diagnostics.parquet`.
-- Log-scale plot errors:
-  - ensure plotted metric has strictly positive values when using `yscale='log'`.
-
-## Entry Point
-
-The package exposes:
-
-```powershell
-io-net
-```
-
-implemented by `io_networks.cli:main`.
+- If a downstream build step cannot find inputs, run the upstream steps first.
+- If `build-xi`, `build-c`, or `build-c-diff` returns non-`ok` statuses, inspect the corresponding diagnostics parquet files and summary CSVs.
+- If a control merge fails in LP code, check both the merge keys and `merge_key_columns` against the source file headers.
+- If local projections fail after lead and lag construction, reduce horizons or lag counts, or inspect missingness after merges.
+- If clustered LP inference fails, make sure the estimation sample still contains at least two countries and more rows than regressors after fixed effects and lags are added.
+- If quarterly cumulative LP targets behave unexpectedly, verify whether annual CPI override is enabled for full-year windows.
