@@ -70,11 +70,49 @@ def _extract_year(series: pd.Series, freq: str) -> pd.Series:
         dt_year = pd.to_datetime(series, errors='coerce').dt.year
         return num_year.fillna(dt_year)
     if freq == 'Q':
-        return pd.to_numeric(series.astype(str).str.slice(0, 4), errors='coerce')
+        series_str = series.astype(str)
+        str_year = pd.to_numeric(series_str.str.extract(r'^(\d{4})-Q[1-4]$')[0], errors='coerce')
+        dt_year = pd.to_datetime(series.where(str_year.isna()), errors='coerce').dt.year
+        return str_year.fillna(dt_year)
     raise ValueError(f"Unsupported freq '{freq}'.")
 
 
-def load_cpi_pct_change(path: Path, freq: str = 'A') -> pd.DataFrame:
+def _extract_subperiod(series: pd.Series, freq: str) -> pd.Series:
+    if freq == 'A':
+        return pd.Series(1, index=series.index, dtype='Int64')
+    if freq == 'Q':
+        series_str = series.astype(str)
+        str_quarter = pd.to_numeric(series_str.str.extract(r'^(\d{4})-Q([1-4])$')[1], errors='coerce')
+        dt_quarter = pd.to_datetime(series.where(str_quarter.isna()), errors='coerce').dt.quarter
+        return str_quarter.fillna(dt_quarter).astype('Int64')
+    if freq == 'M':
+        dt = pd.to_datetime(series, errors='coerce')
+        return dt.dt.month.astype('Int64')
+    raise ValueError(f"Unsupported freq '{freq}'.")
+
+
+def _build_period_columns(series: pd.Series, freq: str) -> pd.DataFrame:
+    year = _extract_year(series, freq=freq)
+    subperiod = _extract_subperiod(series, freq=freq)
+    out = pd.DataFrame({'year': year, 'subperiod': subperiod})
+    out = out.dropna(subset=['year', 'subperiod']).copy()
+    out['year'] = out['year'].astype(int)
+    out['subperiod'] = out['subperiod'].astype(int)
+    if freq == 'A':
+        out['period'] = out['year'].astype(str)
+        out['time_index'] = out['year']
+    elif freq == 'Q':
+        out['period'] = out['year'].astype(str) + '-Q' + out['subperiod'].astype(str)
+        out['time_index'] = out['year'] * 4 + out['subperiod'] - 1
+    elif freq == 'M':
+        out['period'] = out['year'].astype(str) + '-M' + out['subperiod'].astype(str).str.zfill(2)
+        out['time_index'] = out['year'] * 12 + out['subperiod'] - 1
+    else:
+        raise ValueError(f"Unsupported freq '{freq}'.")
+    return out[['year', 'subperiod', 'period', 'time_index']]
+
+
+def load_cpi_pct_change(path: Path, freq: str = 'A', collapse_to_yearly: bool = True) -> pd.DataFrame:
     if freq not in {'A', 'M', 'Q'}:
         raise ValueError(f"Unsupported cpi freq '{freq}'. Use 'A', 'M', or 'Q'.")
 
@@ -103,32 +141,38 @@ def load_cpi_pct_change(path: Path, freq: str = 'A') -> pd.DataFrame:
     out = df.loc[mask, ['REF_AREA', 'TIME_PERIOD', 'OBS_VALUE']].rename(
         columns={
             'REF_AREA': 'country',
-            'TIME_PERIOD': 'year',
+            'TIME_PERIOD': 'time_period',
             'OBS_VALUE': 'cpi_pct_change',
         }
     )
 
-    out['year'] = _extract_year(out['year'], freq=freq)
     out['cpi_pct_change'] = pd.to_numeric(out['cpi_pct_change'], errors='coerce')
     # Convert percent units to proportion units for regression use.
     out['cpi_pct_change'] = out['cpi_pct_change'] / 100.0
-    out = out.dropna(subset=['country', 'year', 'cpi_pct_change'])
-    out['year'] = out['year'].astype(int)
+    out = out.dropna(subset=['country', 'time_period', 'cpi_pct_change']).reset_index(drop=True)
 
-    if freq in {'M', 'Q'}:
+    period_cols = _build_period_columns(out['time_period'], freq=freq)
+    out = pd.concat([out[['country', 'cpi_pct_change']].reset_index(drop=True), period_cols.reset_index(drop=True)], axis=1)
+
+    if collapse_to_yearly and freq in {'M', 'Q'}:
         out = (
             out.groupby(['country', 'year'], as_index=False)
             .agg(cpi_pct_change=('cpi_pct_change', 'mean'))
         )
+        dup_count = int(out.duplicated(['country', 'year']).sum())
+        if dup_count > 0:
+            raise ValueError(f'CPI filtered data has {dup_count} duplicate country-year rows.')
+        return out
 
-    dup_count = int(out.duplicated(['country', 'year']).sum())
+    key_cols = ['country', 'year'] if collapse_to_yearly else ['country', 'period']
+    dup_count = int(out.duplicated(key_cols).sum())
     if dup_count > 0:
-        raise ValueError(f'CPI filtered data has {dup_count} duplicate country-year rows.')
+        raise ValueError(f'CPI filtered data has {dup_count} duplicate rows for keys {key_cols}.')
 
     return out
 
 
-def load_oil_pct_change(path: Path, freq: str = 'A') -> pd.DataFrame:
+def load_oil_pct_change(path: Path, freq: str = 'A', collapse_to_yearly: bool = True) -> pd.DataFrame:
     if freq not in {'A', 'M', 'Q'}:
         raise ValueError(f"Unsupported oil freq '{freq}'. Use 'A', 'M', or 'Q'.")
 
@@ -136,18 +180,23 @@ def load_oil_pct_change(path: Path, freq: str = 'A') -> pd.DataFrame:
     df = pd.read_csv(path, usecols=usecols)
 
     out = df.rename(columns={'pct_change': 'oil_pct_change'}).copy()
-    out['year'] = _extract_year(out['date'], freq=freq)
     out['oil_pct_change'] = pd.to_numeric(out['oil_pct_change'], errors='coerce')
-    out = out.dropna(subset=['year', 'oil_pct_change'])
-    out['year'] = out['year'].astype(int)
-    out = out[['year', 'oil_pct_change']]
+    out = out.dropna(subset=['date', 'oil_pct_change']).reset_index(drop=True)
 
-    if freq in {'M', 'Q'}:
+    period_cols = _build_period_columns(out['date'], freq=freq)
+    out = pd.concat([period_cols.reset_index(drop=True), out[['oil_pct_change']].reset_index(drop=True)], axis=1)
+
+    if collapse_to_yearly and freq in {'M', 'Q'}:
         out = out.groupby('year', as_index=False).agg(oil_pct_change=('oil_pct_change', 'mean'))
+        dup_count = int(out.duplicated(['year']).sum())
+        if dup_count > 0:
+            raise ValueError(f'Oil data has {dup_count} duplicate year rows.')
+        return out
 
-    dup_count = int(out.duplicated(['year']).sum())
+    key_cols = ['year'] if collapse_to_yearly else ['period']
+    dup_count = int(out.duplicated(key_cols).sum())
     if dup_count > 0:
-        raise ValueError(f'Oil data has {dup_count} duplicate year rows.')
+        raise ValueError(f'Oil data has {dup_count} duplicate rows for keys {key_cols}.')
 
     return out
 
