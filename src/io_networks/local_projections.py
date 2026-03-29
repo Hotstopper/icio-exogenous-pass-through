@@ -167,9 +167,9 @@ def build_panel_lp_dataset(
 
     xi_df = regression.load_xi(Path(xi_path)).sort_values(["country", "year"]).reset_index(drop=True)
     if lag_xi_by_one_year_for_xi_x_oil:
-        xi_df["xi_for_xi_x_oil"] = xi_df.groupby("country")["xi"].shift(1)
+        xi_df["xi_for_interactions"] = xi_df.groupby("country")["xi"].shift(1)
     else:
-        xi_df["xi_for_xi_x_oil"] = xi_df["xi"]
+        xi_df["xi_for_interactions"] = xi_df["xi"]
     collapse_to_yearly = cpi_freq == "A"
     cpi_df = regression.load_cpi_pct_change(Path(cpi_path), freq=cpi_freq, collapse_to_yearly=collapse_to_yearly)
     oil_source = Path(oil_path) if oil_path is not None else regression.OIL_DEFAULT_BY_FREQ[cpi_freq]
@@ -207,9 +207,9 @@ def build_panel_lp_dataset(
             )
         panel = panel.sort_values(["country", "time_index"]).reset_index(drop=True)
         panel_keys = ["country", "period"]
-    panel["xi_x_oil"] = panel["xi_for_xi_x_oil"] * panel["oil_pct_change"]
+    panel["xi_x_oil"] = panel["xi_for_interactions"] * panel["oil_pct_change"]
     if news_df is not None:
-        panel["xi_x_news"] = panel["xi"] * panel["news"]
+        panel["xi_x_news"] = panel["xi_for_interactions"] * panel["news"]
 
     for spec in controls or []:
         control_name = str(spec["name"])

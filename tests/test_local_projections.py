@@ -268,7 +268,7 @@ def test_build_panel_lp_dataset_keeps_quarterly_rows():
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_build_panel_lp_dataset_can_lag_xi_by_one_year_for_xi_x_oil():
+def test_build_panel_lp_dataset_can_lag_xi_by_one_year_for_interactions():
     temp_root = Path.cwd() / "outputs" / f"test_local_projections_{uuid.uuid4().hex}"
     temp_root.mkdir(parents=True, exist_ok=True)
     try:
@@ -308,10 +308,22 @@ def test_build_panel_lp_dataset_can_lag_xi_by_one_year_for_xi_x_oil():
         oil_path = temp_root / "oil.csv"
         oil_df.to_csv(oil_path, index=False)
 
+        news_df = pd.DataFrame(
+            {
+                "date": ["2000-03-31", "2000-06-30", "2001-03-31", "2001-06-30"],
+                "period": ["2000Q1", "2000Q2", "2001Q1", "2001Q2"],
+                "news_shock": [1.5, -2.0, 0.5, 3.0],
+            }
+        )
+        news_path = temp_root / "kaenzig.csv"
+        news_df.to_csv(news_path, index=False)
+
         panel = build_panel_lp_dataset(
             xi_path=xi_path,
             cpi_path=cpi_path,
             oil_path=oil_path,
+            news_path=news_path,
+            news_column="news_shock",
             cpi_freq="Q",
             lag_xi_by_one_year_for_xi_x_oil=True,
         )
@@ -322,9 +334,12 @@ def test_build_panel_lp_dataset_can_lag_xi_by_one_year_for_xi_x_oil():
 
         assert aaa_2000_q1["xi"] == 1.0
         assert pd.isna(aaa_2000_q1["xi_x_oil"])
+        assert pd.isna(aaa_2000_q1["xi_x_news"])
         assert aaa_2001_q1["xi"] == 1.2
         assert aaa_2001_q1["xi_x_oil"] == 1.0 * 0.30
+        assert aaa_2001_q1["xi_x_news"] == 1.0 * 0.5
         assert bbb_2001_q2["xi_x_oil"] == 0.5 * 0.40
+        assert bbb_2001_q2["xi_x_news"] == 0.5 * 3.0
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
 
