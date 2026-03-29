@@ -9,6 +9,8 @@ from io_networks.c_diff import build_c_diff
 from io_networks.config import load_config
 from io_networks.eda import run_eda
 from io_networks.matrices import build_yearly_a
+from io_networks.policy_rates import build_policy_rate_table
+from io_networks.real_gdp import build_output_gap_table, build_real_gdp_table
 from io_networks.xi import build_xi
 
 
@@ -42,6 +44,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build country-year c_diff metrics from (c_N - c_gdp_N) and HFCE weights",
     )
     build_c_diff_cmd.add_argument("--config", type=Path, default=Path("config/default.yaml"))
+
+    build_real_gdp_cmd = subparsers.add_parser(
+        "build-real-gdp",
+        help="Build a unified quarterly real GDP table from raw country sources",
+    )
+    build_real_gdp_cmd.add_argument("--config", type=Path, default=Path("config/default.yaml"))
+
+    build_output_gap_cmd = subparsers.add_parser(
+        "build-output-gap",
+        help="Build quarterly log real GDP and HP-filtered output gaps",
+    )
+    build_output_gap_cmd.add_argument("--config", type=Path, default=Path("config/default.yaml"))
+
+    build_policy_rates_cmd = subparsers.add_parser(
+        "build-policy-rates",
+        help="Build a quarterly policy-rate table from monthly BIS policy rates",
+    )
+    build_policy_rates_cmd.add_argument("--config", type=Path, default=Path("config/default.yaml"))
 
     return parser
 
@@ -80,6 +100,21 @@ def main() -> None:
     if args.command == "build-c-diff":
         output_file = build_c_diff(cfg)
         print(f"C diff output written to: {output_file}")
+        return
+
+    if args.command == "build-real-gdp":
+        output_file = build_real_gdp_table(args.config)
+        print(f"Real GDP output written to: {output_file}")
+        return
+
+    if args.command == "build-output-gap":
+        output_file = build_output_gap_table(args.config)
+        print(f"Output gap table written to: {output_file}")
+        return
+
+    if args.command == "build-policy-rates":
+        output_file = build_policy_rate_table(args.config)
+        print(f"Policy-rate table written to: {output_file}")
         return
 
     parser.error(f"Unknown command: {args.command}")

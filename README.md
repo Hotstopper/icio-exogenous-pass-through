@@ -70,6 +70,8 @@ implemented by `io_networks.cli:main`.
 |  |  |- c_diff/
 |  |  |- cpi/
 |  |  |- exchange_rates/
+|  |  |- policy_rates/
+|  |  |- real_gdp/
 |  |  |- oil/
 |  |  `- xi/
 |  `- reference/
@@ -86,6 +88,8 @@ implemented by `io_networks.cli:main`.
 |  |- logging.py
 |  |- matrices.py
 |  |- paths.py
+|  |- policy_rates.py
+|  |- real_gdp.py
 |  |- regression.py
 |  |- viz.py
 |  |- viz_xi.py
@@ -135,6 +139,9 @@ io-net build-blocks --config config/default.yaml
 io-net build-xi --config config/default.yaml
 io-net build-c --config config/default.yaml
 io-net build-c-diff --config config/default.yaml
+io-net build-real-gdp --config config/default.yaml
+io-net build-output-gap --config config/default.yaml
+io-net build-policy-rates --config config/default.yaml
 ```
 
 Recommended order:
@@ -145,6 +152,9 @@ Recommended order:
 4. `io-net build-xi`
 5. `io-net build-c`
 6. `io-net build-c-diff`
+7. `io-net build-real-gdp`
+8. `io-net build-output-gap`
+9. `io-net build-policy-rates`
 
 ## Build Outputs
 
@@ -241,6 +251,49 @@ Outputs under `data/processed/c_diff/<variant>`:
 
 Possible `status` values include `ok`, `missing_hfce_column`, `zero_hfce_mass`, and `missing_c_diff_vector`.
 
+### `build-real-gdp`
+
+Builds a unified quarterly real GDP table from raw IMF and country-source files.
+
+Outputs under `data/processed/real_gdp/`:
+- `quarterly_real_gdp.csv`
+
+Important output fields include:
+- `country`
+- `country_name`
+- `period`
+- `year`
+- `quarter`
+- `real_gdp`
+
+### `build-output-gap`
+
+Builds quarterly log real GDP and HP-filtered output gaps from `quarterly_real_gdp.csv`.
+
+Outputs under `data/processed/real_gdp/`:
+- `quarterly_output_gap.csv`
+
+Important output fields include:
+- `country`
+- `country_name`
+- `period`
+- `year`
+- `quarter`
+- `real_gdp`
+- `log_real_gdp`
+- `hp_trend_log_real_gdp`
+- `output_gap`
+- `hp_filter_status`
+
+### `build-policy-rates`
+
+Builds quarterly policy-rate controls from the BIS monthly central-bank policy-rate export.
+
+Outputs under `data/processed/policy_rates/`:
+- `quarterly_policy_rates.csv`
+
+The quarterly series is the simple mean of the three monthly observations in each quarter. For euro adopters, missing observations from the adoption quarter onward are filled with the Euro area aggregate rate.
+
 ## Regression Workflow
 
 `src/io_networks/regression.py` provides utilities to:
@@ -319,10 +372,16 @@ The LP dataset builder now supports generic controls with:
 - custom source column names via `merge_key_columns`
 - optional sample restriction using `required_for_sample`
 
-That is what powers the quarterly exchange-rate control in the notebooks, where:
+That is what powers the quarterly controls in the notebooks, including:
 - source file: `data/processed/exchange_rates/quarterly_exchange_rates.csv`
 - source value column: `log_diff`
 - merged control name inside LP panels: `exchange_rate`
+- source file: `data/processed/real_gdp/quarterly_output_gap.csv`
+- source value column: `output_gap`
+- merged control name inside LP panels: `output_gap`
+- source file: `data/processed/policy_rates/quarterly_policy_rates.csv`
+- source value column: `policy_rate`
+- merged control name inside LP panels: `policy_rate`
 
 ## Notebooks
 
@@ -344,7 +403,8 @@ Current LP notebook conventions:
 - both panel LP notebooks use quarterly CPI and quarterly oil
 - optional controls are defined through `panel_controls`
 - controls that enter the regression are listed separately in `regression_controls`
-- the current quarterly exchange-rate control is merged from `quarterly_exchange_rates.csv` and used as `exchange_rate`
+- the current quarterly controls are `exchange_rate`, `output_gap`, and `policy_rate`
+- output-gap and policy-rate control files are built from raw source data via the CLI commands above
 
 Visualization helpers live mainly in:
 - `src/io_networks/viz.py`
