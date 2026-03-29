@@ -8,6 +8,7 @@ from io_networks.c import build_c
 from io_networks.c_diff import build_c_diff
 from io_networks.config import load_config
 from io_networks.eda import run_eda
+from io_networks.kaenzig_oil_surprises import build_kaenzig_oil_surprise_tables
 from io_networks.matrices import build_yearly_a
 from io_networks.policy_rates import build_policy_rate_table
 from io_networks.real_gdp import build_output_gap_table, build_real_gdp_table
@@ -63,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build_policy_rates_cmd.add_argument("--config", type=Path, default=Path("config/default.yaml"))
 
+    build_kaenzig_oil_cmd = subparsers.add_parser(
+        "build-kaenzig-oil-surprises",
+        help="Build monthly and quarterly Kaenzig oil supply surprise vintage tables",
+    )
+    build_kaenzig_oil_cmd.add_argument("--config", type=Path, default=Path("config/default.yaml"))
+
     return parser
 
 
@@ -115,6 +122,12 @@ def main() -> None:
     if args.command == "build-policy-rates":
         output_file = build_policy_rate_table(args.config)
         print(f"Policy-rate table written to: {output_file}")
+        return
+
+    if args.command == "build-kaenzig-oil-surprises":
+        monthly_path, quarterly_path = build_kaenzig_oil_surprise_tables(cfg)
+        print(f"Monthly Kaenzig oil surprise table written to: {monthly_path}")
+        print(f"Quarterly Kaenzig oil surprise table written to: {quarterly_path}")
         return
 
     parser.error(f"Unknown command: {args.command}")

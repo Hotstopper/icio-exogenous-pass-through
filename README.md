@@ -9,6 +9,7 @@ This repository does three connected jobs:
 1. Builds yearly ICIO-derived matrix objects from OECD input-output tables.
 2. Aggregates sector-level objects into country-year measures such as `xi`, `c`, and `c_diff`.
 3. Supports OLS and panel local projection analysis using those derived measures plus CPI, oil, and other controls.
+4. Supports LP-IV workflows that instrument `xi_x_oil` with news-based shock series such as Kaenzig oil supply surprises.
 
 At a high level, the workflow is:
 
@@ -257,6 +258,66 @@ Builds a unified quarterly real GDP table from raw IMF and country-source files.
 
 Outputs under `data/processed/real_gdp/`:
 - `quarterly_real_gdp.csv`
+
+### `build-policy-rates`
+
+Builds the quarterly policy-rate panel used as an optional control in the LP and LP-IV notebooks.
+
+Outputs under `data/processed/policy_rates/`:
+- `quarterly_policy_rates.csv`
+
+### Kaenzig Oil Surprise Tables
+
+The repository also supports processing Kaenzig oil supply surprise vintages into monthly and quarterly tables.
+
+Processed outputs under `data/processed/oil/` include:
+- `kaenzig_oil_supply_surprises_monthly.csv`
+- `kaenzig_oil_supply_surprises_quarterly.csv`
+
+The quarterly file can contain one or more candidate instrument columns. The LP-IV workflow now lets you choose which one to use explicitly.
+
+## Local Projections and LP-IV
+
+Notebook-first workflows live under `notebooks/`.
+
+Core notebooks include:
+- `panel_local_projections.ipynb`
+- `panel_cumulative_local_projections.ipynb`
+- `panel_local_projections_iv.ipynb`
+- `panel_cumulative_local_projections_iv.ipynb`
+
+The shared implementation lives in:
+- `src/io_networks/local_projections.py`
+
+The IV notebooks estimate 2SLS local projections with:
+- endogenous regressor: `xi_x_oil`
+- instrument: `xi_x_news`
+
+`xi_x_news` is constructed inside the panel builder as:
+
+```text
+xi_x_news = xi * news
+```
+
+where `news` is loaded from the selected column of the quarterly Kaenzig CSV.
+
+### Choosing the Instrument Column
+
+At the top of each IV notebook, set:
+
+```python
+news_column = "surprise"
+```
+
+or:
+
+```python
+news_column = "news_shock"
+```
+
+Then the notebook passes `news_column` into `build_panel_lp_dataset(...)`, which normalizes the selected source column to the internal `news` field and builds `xi_x_news` from it.
+
+This means you do not need to rename columns in the shared code when switching instruments; only the notebook setting changes.
 
 Important output fields include:
 - `country`

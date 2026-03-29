@@ -33,6 +33,7 @@ EURO_ADOPTION_STARTS = {
     "ITA": "1999Q1",
     "NLD": "1999Q1",
     "PRT": "1999Q1",
+    "CYP": "2008Q1",
     "EST": "2011Q1",
     "IRL": "2002Q1",
     "FIN": "2002Q1",
