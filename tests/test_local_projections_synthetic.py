@@ -11,7 +11,13 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from io_networks.local_projections import build_cumulative_targets, fit_cumulative_panel_local_projections, fit_panel_local_projections
+from io_networks.local_projections import (
+    build_cumulative_targets,
+    fit_cumulative_panel_local_projections,
+    fit_cumulative_panel_local_projections_iv,
+    fit_panel_local_projections,
+    fit_panel_local_projections_iv,
+)
 
 
 def _make_synthetic_panel(
@@ -54,6 +60,49 @@ def _make_synthetic_panel(
             y_lag2 = y_lag1
             y_lag1 = cpi
             shock_lag1 = shock
+    return pd.DataFrame(rows)
+
+
+def _make_synthetic_iv_panel(
+    *,
+    n_countries: int = 25,
+    n_periods: int = 48,
+    seed: int = 321,
+) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    countries = [f"C{i:02d}" for i in range(n_countries)]
+    years = 2000 + np.arange(n_periods) // 4
+    quarters = 1 + np.arange(n_periods) % 4
+    news = rng.normal(0.0, 1.0, size=n_periods)
+
+    rows: list[dict[str, float | int | str]] = []
+    for country_idx, country in enumerate(countries):
+        xi = float(0.6 + 0.03 * country_idx)
+        country_fe = float(rng.normal(0.0, 0.02))
+        cpi_lag1 = 0.0
+        shock_lag1 = 0.0
+        for t in range(n_periods):
+            period_news = float(news[t])
+            shock_noise = float(rng.normal(0.0, 0.15))
+            xi_x_news = xi * period_news
+            xi_x_oil = 0.85 * xi_x_news + 0.35 * cpi_lag1 + shock_noise
+            eps = 0.40 * shock_noise + float(rng.normal(0.0, 0.08))
+            cpi = 0.50 * cpi_lag1 + 0.60 * xi_x_oil + 0.10 * shock_lag1 + country_fe + eps
+            year = int(years[t])
+            quarter = int(quarters[t])
+            rows.append(
+                {
+                    "country": country,
+                    "year": year,
+                    "period": f"{year}-Q{quarter}",
+                    "time_index": int(year * 4 + quarter - 1),
+                    "xi_x_news": float(xi_x_news),
+                    "xi_x_oil": float(xi_x_oil),
+                    "cpi_pct_change": float(cpi),
+                }
+            )
+            cpi_lag1 = cpi
+            shock_lag1 = xi_x_oil
     return pd.DataFrame(rows)
 
 
@@ -129,3 +178,42 @@ def test_synthetic_identity_holds_with_common_sample():
     max_abs_identity_diff = float(diagnostic.loc[diagnostic["horizon"] >= 1, "identity_diff"].abs().max())
 
     assert max_abs_identity_diff < 1e-10
+
+
+def test_panel_lp_iv_recovers_positive_contemporaneous_effect():
+    df = _make_synthetic_iv_panel()
+
+    irf_df, coef_df, _ = fit_panel_local_projections_iv(
+        df,
+        horizons=3,
+        y_lags=1,
+        shock_lags=1,
+        include_country_fe=True,
+        include_year_fe=False,
+        cov_type="cluster_country",
+        common_sample=True,
+    )
+
+    h0 = float(irf_df.loc[irf_df["horizon"] == 0, "coef"].iloc[0])
+    assert h0 > 0.2
+    assert "xi_x_oil_lag1" in set(coef_df.loc[coef_df["horizon"] == 0, "term"])
+
+
+def test_cumulative_lp_iv_returns_compatible_irf_output():
+    df = _make_synthetic_iv_panel()
+    df = build_cumulative_targets(df, horizons=3)
+
+    irf_df, _, _ = fit_cumulative_panel_local_projections_iv(
+        df,
+        horizons=3,
+        y_lags=1,
+        shock_lags=1,
+        include_country_fe=True,
+        include_time_fe=False,
+        cov_type="cluster_country",
+        common_sample=True,
+    )
+
+    assert irf_df["horizon"].tolist() == [0, 1, 2, 3]
+    assert set(irf_df["term"]) == {"xi_x_oil"}
+    assert {"coef", "ci_low_95", "ci_high_95"}.issubset(irf_df.columns)
