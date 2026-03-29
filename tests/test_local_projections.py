@@ -268,6 +268,67 @@ def test_build_panel_lp_dataset_keeps_quarterly_rows():
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
+def test_build_panel_lp_dataset_can_lag_xi_by_one_year_for_xi_x_oil():
+    temp_root = Path.cwd() / "outputs" / f"test_local_projections_{uuid.uuid4().hex}"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    try:
+        xi_df = pd.DataFrame(
+            {
+                "year": [2000, 2001, 2000, 2001],
+                "country": ["AAA", "AAA", "BBB", "BBB"],
+                "xi": [1.0, 1.2, 0.5, 0.7],
+                "status": ["ok", "ok", "ok", "ok"],
+            }
+        )
+        xi_path = temp_root / "xi.parquet"
+        xi_df.to_parquet(xi_path, index=False)
+
+        cpi_df = pd.DataFrame(
+            {
+                "FREQ": ["Q"] * 8,
+                "MEASURE": ["CPI"] * 8,
+                "METHODOLOGY": ["N"] * 8,
+                "EXPENDITURE": ["_T"] * 8,
+                "ADJUSTMENT": ["N"] * 8,
+                "UNIT_MEASURE": ["PC"] * 8,
+                "REF_AREA": ["AAA", "AAA", "AAA", "AAA", "BBB", "BBB", "BBB", "BBB"],
+                "TIME_PERIOD": ["2000-Q1", "2000-Q2", "2001-Q1", "2001-Q2", "2000-Q1", "2000-Q2", "2001-Q1", "2001-Q2"],
+                "OBS_VALUE": [2.0, 2.5, 3.0, 3.5, 1.0, 1.5, 2.0, 2.5],
+            }
+        )
+        cpi_path = temp_root / "cpi.csv"
+        cpi_df.to_csv(cpi_path, index=False)
+
+        oil_df = pd.DataFrame(
+            {
+                "date": ["2000-03-31", "2000-06-30", "2001-03-31", "2001-06-30"],
+                "pct_change": [0.10, 0.20, 0.30, 0.40],
+            }
+        )
+        oil_path = temp_root / "oil.csv"
+        oil_df.to_csv(oil_path, index=False)
+
+        panel = build_panel_lp_dataset(
+            xi_path=xi_path,
+            cpi_path=cpi_path,
+            oil_path=oil_path,
+            cpi_freq="Q",
+            lag_xi_by_one_year_for_xi_x_oil=True,
+        )
+
+        aaa_2000_q1 = panel.loc[(panel["country"] == "AAA") & (panel["period"] == "2000-Q1")].iloc[0]
+        aaa_2001_q1 = panel.loc[(panel["country"] == "AAA") & (panel["period"] == "2001-Q1")].iloc[0]
+        bbb_2001_q2 = panel.loc[(panel["country"] == "BBB") & (panel["period"] == "2001-Q2")].iloc[0]
+
+        assert aaa_2000_q1["xi"] == 1.0
+        assert pd.isna(aaa_2000_q1["xi_x_oil"])
+        assert aaa_2001_q1["xi"] == 1.2
+        assert aaa_2001_q1["xi_x_oil"] == 1.0 * 0.30
+        assert bbb_2001_q2["xi_x_oil"] == 0.5 * 0.40
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
 def test_build_panel_lp_dataset_adds_quarterly_kaenzig_news_instrument():
     temp_root = Path.cwd() / "outputs" / f"test_local_projections_{uuid.uuid4().hex}"
     temp_root.mkdir(parents=True, exist_ok=True)

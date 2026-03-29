@@ -155,6 +155,7 @@ def build_panel_lp_dataset(
     oil_path: str | Path | None = None,
     news_path: str | Path | None = None,
     news_column: str | None = None,
+    lag_xi_by_one_year_for_xi_x_oil: bool = False,
     cpi_freq: str = "A",
     controls: list[dict[str, Any]] | None = None,
     exclude_countries: list[str] | None = None,
@@ -164,7 +165,11 @@ def build_panel_lp_dataset(
     if cpi_freq not in regression.OIL_DEFAULT_BY_FREQ:
         raise ValueError(f"Unsupported cpi_freq '{cpi_freq}'.")
 
-    xi_df = regression.load_xi(Path(xi_path))
+    xi_df = regression.load_xi(Path(xi_path)).sort_values(["country", "year"]).reset_index(drop=True)
+    if lag_xi_by_one_year_for_xi_x_oil:
+        xi_df["xi_for_xi_x_oil"] = xi_df.groupby("country")["xi"].shift(1)
+    else:
+        xi_df["xi_for_xi_x_oil"] = xi_df["xi"]
     collapse_to_yearly = cpi_freq == "A"
     cpi_df = regression.load_cpi_pct_change(Path(cpi_path), freq=cpi_freq, collapse_to_yearly=collapse_to_yearly)
     oil_source = Path(oil_path) if oil_path is not None else regression.OIL_DEFAULT_BY_FREQ[cpi_freq]
@@ -202,7 +207,7 @@ def build_panel_lp_dataset(
             )
         panel = panel.sort_values(["country", "time_index"]).reset_index(drop=True)
         panel_keys = ["country", "period"]
-    panel["xi_x_oil"] = panel["xi"] * panel["oil_pct_change"]
+    panel["xi_x_oil"] = panel["xi_for_xi_x_oil"] * panel["oil_pct_change"]
     if news_df is not None:
         panel["xi_x_news"] = panel["xi"] * panel["news"]
 
