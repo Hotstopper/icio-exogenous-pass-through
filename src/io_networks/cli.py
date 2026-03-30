@@ -13,6 +13,7 @@ from io_networks.matrices import build_yearly_a
 from io_networks.policy_rates import build_policy_rate_table
 from io_networks.real_gdp import build_output_gap_table, build_real_gdp_table
 from io_networks.xi import build_xi
+from io_networks.zeta import build_zeta
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
         "build-xi", help="Build country-year xi metrics from tau and HFCE weights"
     )
     build_xi_cmd.add_argument("--config", type=Path, default=Path("config/default.yaml"))
+
+    build_zeta_cmd = subparsers.add_parser(
+        "build-zeta", help="Build country-year zeta metrics from chi and HFCE weights"
+    )
+    build_zeta_cmd.add_argument("--config", type=Path, default=Path("config/default.yaml"))
 
     build_c_cmd = subparsers.add_parser(
         "build-c", help="Build country-year c metrics from c_N and HFCE weights"
@@ -97,6 +103,11 @@ def main() -> None:
     if args.command == "build-xi":
         output_file = build_xi(cfg)
         print(f"Xi output written to: {output_file}")
+        return
+
+    if args.command == "build-zeta":
+        output_file = build_zeta(cfg)
+        print(f"Zeta output written to: {output_file}")
         return
 
     if args.command == "build-c":

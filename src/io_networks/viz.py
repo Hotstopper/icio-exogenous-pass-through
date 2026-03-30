@@ -8,7 +8,7 @@ import pandas as pd
 
 from io_networks.paths import resolve_paths
 
-_ALLOWED_METRICS = {"tau", "tau_dir", "tau_amp", "tau_amp2"}
+_ALLOWED_METRICS = {"tau", "tau_dir", "tau_amp", "tau_amp2", "chi"}
 
 
 def _load_tau_arrays(
@@ -19,8 +19,9 @@ def _load_tau_arrays(
     if metric not in _ALLOWED_METRICS:
         raise ValueError(f"metric must be one of {sorted(_ALLOWED_METRICS)}")
     if not blocks_npz.exists() or not blocks_meta.exists():
+        year = blocks_npz.stem.replace("blocks_", "")
         raise FileNotFoundError(
-            f"Missing blocks files in {blocks_npz.parent} for year {blocks_npz.stem.replace('blocks_', '')}. "
+            f"Missing blocks files in {blocks_npz.parent} for year {year}. "
             "Run build-blocks first."
         )
 
@@ -38,7 +39,10 @@ def _load_tau_arrays(
         tau_amp_tail = arr["tau_amp"]
     else:
         if metric not in arr.files:
-            raise ValueError(f"Metric {metric} not found in {blocks_npz.name}. Available: {arr.files}")
+            raise ValueError(
+                f"Metric {metric} not found in {blocks_npz.name}. "
+                f"Available: {arr.files}"
+            )
         metric_col = metric
         tau_values = arr[metric_col]
         tau_amp_tail = None
@@ -49,8 +53,8 @@ def _load_tau_arrays(
 
     if len(labels_n) != len(tau_values):
         raise ValueError(
-            f"Mismatch between labels ({len(labels_n)}) and {metric_col} length ({len(tau_values)}) "
-            f"for {blocks_npz.stem}."
+            f"Mismatch between labels ({len(labels_n)}) and "
+            f"{metric_col} length ({len(tau_values)}) for {blocks_npz.stem}."
         )
     if tau_amp_tail is not None and len(labels_n) != len(tau_amp_tail):
         raise ValueError(
@@ -122,6 +126,7 @@ def _metric_label(metric: str) -> str:
         "tau_dir": r"$\tau_{dir}$",
         "tau_amp": r"$\tau_{amp}$",
         "tau_amp2": r"$\tau$ with $\tau_{amp}$ tails",
+        "chi": r"$\chi$",
     }
     return labels.get(metric, metric)
 
@@ -194,12 +199,18 @@ def prepare_country_bubble_data(
     if df.empty:
         raise ValueError(f"No non-exogenous rows found for country={country}, year={year}.")
 
-    a_meta_df = pd.read_parquet(a_meta)[["sector", "out"]].rename(columns={"sector": "label", "out": "out_proxy"})
+    a_meta_df = pd.read_parquet(a_meta)[["sector", "out"]].rename(
+        columns={"sector": "label", "out": "out_proxy"}
+    )
     df = df.merge(a_meta_df, on="label", how="left")
     df["out_proxy"] = pd.to_numeric(df["out_proxy"], errors="coerce").fillna(0.0).clip(lower=0.0)
 
     sector_ref = _load_sector_reference(ref_dir / "sector_codes.csv")
-    country_ref = _load_reference_table(ref_dir / "country_codes.csv", "country_code", "country_name")
+    country_ref = _load_reference_table(
+        ref_dir / "country_codes.csv",
+        "country_code",
+        "country_name",
+    )
 
     if not sector_ref.empty:
         df = df.merge(sector_ref, on="sector_code", how="left")
@@ -267,7 +278,11 @@ def prepare_all_countries_bubble_data(
     df["sector_code"] = df["label"].map(_sector_code_from_label)
 
     sector_ref = _load_sector_reference(ref_dir / "sector_codes.csv")
-    country_ref = _load_reference_table(ref_dir / "country_codes.csv", "country_code", "country_name")
+    country_ref = _load_reference_table(
+        ref_dir / "country_codes.csv",
+        "country_code",
+        "country_name",
+    )
 
     if not sector_ref.empty:
         df = df.merge(sector_ref, on="sector_code", how="left")
@@ -285,14 +300,20 @@ def prepare_all_countries_bubble_data(
             columns={"sector": "label", "out": "out_proxy"}
         )
         df = df.merge(a_meta_df, on="label", how="left")
-        df["out_proxy"] = pd.to_numeric(df["out_proxy"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        df["out_proxy"] = (
+            pd.to_numeric(df["out_proxy"], errors="coerce")
+            .fillna(0.0)
+            .clip(lower=0.0)
+        )
     else:
         df["out_proxy"] = 0.0
 
     df["sector_bucket"] = df["sector_code"].map(_sector_bucket)
     bucket_order = {"Agriculture": 0, "Manufacturing": 1, "Services": 2, "Other": 3}
     df["_bucket_order"] = df["sector_bucket"].map(bucket_order).fillna(99).astype(int)
-    df = df.sort_values(["_bucket_order", "sector_code", "country_code", "label"]).reset_index(drop=True)
+    df = df.sort_values(
+        ["_bucket_order", "sector_code", "country_code", "label"]
+    ).reset_index(drop=True)
 
     sector_positions = (
         df[["sector_code", "_bucket_order"]]
@@ -428,7 +449,9 @@ def plot_country_bubble(
                     for j, ((cx, cy), r) in enumerate(zip(centers, radii_px)):
                         if _rect_circle_overlap(bbox, cx, cy, r):
                             bubble_overlap += 0.5 if j == row_idx else 1.0
-                    outside = 0 if axes_bbox.contains(*bbox.get_points()[0]) and axes_bbox.contains(*bbox.get_points()[1]) else 1
+                    contains_start = axes_bbox.contains(*bbox.get_points()[0])
+                    contains_end = axes_bbox.contains(*bbox.get_points()[1])
+                    outside = 0 if contains_start and contains_end else 1
                     dist_penalty = np.hypot(dx, dy)
                     cx_label = 0.5 * (bbox.x0 + bbox.x1)
                     cy_label = 0.5 * (bbox.y0 + bbox.y1)
@@ -468,7 +491,9 @@ def plot_country_bubble(
                 va=va,
                 clip_on=True,
             )
-            placed_bboxes.append(final_txt.get_window_extent(renderer=renderer).expanded(1.02, 1.08))
+            placed_bboxes.append(
+                final_txt.get_window_extent(renderer=renderer).expanded(1.02, 1.08)
+            )
 
     bucket_centers = plot.groupby("sector_bucket", as_index=False)["x"].mean()
     ax.set_xticks(bucket_centers["x"])
@@ -486,7 +511,11 @@ def plot_country_bubble(
         ax.set_title(title, fontfamily="serif", fontsize=18)
     else:
         country = str(work["country_code"].iloc[0]) if len(work) else ""
-        country_name = str(work["country_name"].iloc[0]) if len(work) and "country_name" in work.columns else ""
+        country_name = (
+            str(work["country_name"].iloc[0])
+            if len(work) and "country_name" in work.columns
+            else ""
+        )
         if not country_name or country_name.lower() == "nan":
             country_name = country
         year = int(work["year"].iloc[0]) if len(work) else 0
@@ -540,7 +569,10 @@ def plot_all_countries_bubble(
                 code: float(np.linspace(-jitter, jitter, len(stable_order))[i])
                 for i, code in enumerate(stable_order)
             }
-        plot["x_plot"] = plot["x"].to_numpy(dtype=float) + plot["country_code"].map(offsets).fillna(0.0)
+        plot["x_plot"] = (
+            plot["x"].to_numpy(dtype=float)
+            + plot["country_code"].map(offsets).fillna(0.0)
+        )
     else:
         plot["x_plot"] = plot["x"].to_numpy(dtype=float)
 
@@ -705,7 +737,9 @@ def plot_all_countries_boxen(
             median_values.append(float(q50))
 
         if not stats:
-            raise ValueError(f"No non-empty weighted groups available to plot for metric '{metric}'.")
+            raise ValueError(
+                f"No non-empty weighted groups available to plot for metric '{metric}'."
+            )
 
         positions = np.arange(len(stats), dtype=float)
         ax.bxp(
@@ -731,7 +765,10 @@ def plot_all_countries_boxen(
             rng = np.random.default_rng(0)
             for i, grp in enumerate([s["label"] for s in stats]):
                 vals = (
-                    pd.to_numeric(plot.loc[plot[group_col].astype(str) == grp, metric], errors="coerce")
+                    pd.to_numeric(
+                        plot.loc[plot[group_col].astype(str) == grp, metric],
+                        errors="coerce",
+                    )
                     .dropna()
                     .to_numpy(dtype=float)
                 )
@@ -794,7 +831,10 @@ def plot_all_countries_boxen(
             rng = np.random.default_rng(0)
             for i, grp in enumerate(order):
                 vals = (
-                    pd.to_numeric(plot.loc[plot[group_col].astype(str) == grp, metric], errors="coerce")
+                    pd.to_numeric(
+                        plot.loc[plot[group_col].astype(str) == grp, metric],
+                        errors="coerce",
+                    )
                     .dropna()
                     .to_numpy(dtype=float)
                 )

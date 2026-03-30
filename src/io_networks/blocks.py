@@ -51,12 +51,17 @@ def _raw_file_map(raw_dir: Path, year_start: int, year_end: int) -> dict[int, Pa
     return mapping
 
 
-def _compute_v_and_v_over_out(raw_file: Path, sector_labels: list[str]) -> tuple[np.ndarray, np.ndarray, int]:
+def _compute_v_and_v_over_out(
+    raw_file: Path, sector_labels: list[str]
+) -> tuple[np.ndarray, np.ndarray, int]:
     frame = pd.read_csv(raw_file, usecols=["V1", *sector_labels]).set_index("V1")
 
-    tls = pd.to_numeric(frame.reindex(["TLS"]).iloc[0], errors="coerce").fillna(0.0).to_numpy(dtype=float)
-    va = pd.to_numeric(frame.reindex(["VA"]).iloc[0], errors="coerce").fillna(0.0).to_numpy(dtype=float)
-    out = pd.to_numeric(frame.reindex(["OUT"]).iloc[0], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    tls = pd.to_numeric(frame.reindex(["TLS"]).iloc[0], errors="coerce").fillna(0.0)
+    va = pd.to_numeric(frame.reindex(["VA"]).iloc[0], errors="coerce").fillna(0.0)
+    out = pd.to_numeric(frame.reindex(["OUT"]).iloc[0], errors="coerce").fillna(0.0)
+    tls = tls.to_numpy(dtype=float)
+    va = va.to_numpy(dtype=float)
+    out = out.to_numpy(dtype=float)
 
     v = tls + va
     vc = np.zeros_like(v, dtype=float)
@@ -102,7 +107,9 @@ def _build_lambda(n_exo: int, cfg: dict[str, Any]) -> np.ndarray:
         raise ValueError("Exogenous sector set E is empty. Check sectors.exo_codes.")
 
     if method != "uniform":
-        raise ValueError(f"Unsupported lambda.method: {method}. Currently only 'uniform' is implemented.")
+        raise ValueError(
+            f"Unsupported lambda.method: {method}. Currently only 'uniform' is implemented."
+        )
 
     lam = np.ones(n_exo, dtype=float)
     if normalize:
@@ -197,11 +204,19 @@ def build_blocks(cfg: dict[str, Any]) -> Path:
 
         prev_v_by_label = pd.Series(v_full, index=labels, dtype=float)
 
-        e_idx = np.array([i for i, s in enumerate(labels) if _sector_code(s) in exo_codes], dtype=int)
-        n_idx = np.array([i for i, s in enumerate(labels) if _sector_code(s) not in exo_codes], dtype=int)
+        e_idx = np.array(
+            [i for i, s in enumerate(labels) if _sector_code(s) in exo_codes],
+            dtype=int,
+        )
+        n_idx = np.array(
+            [i for i, s in enumerate(labels) if _sector_code(s) not in exo_codes],
+            dtype=int,
+        )
 
         if e_idx.size == 0:
-            raise ValueError(f"Year {year}: no sectors classified as exogenous from codes {sorted(exo_codes)}")
+            raise ValueError(
+                f"Year {year}: no sectors classified as exogenous from codes {sorted(exo_codes)}"
+            )
         if n_idx.size == 0:
             raise ValueError(f"Year {year}: no sectors classified as non-exogenous.")
 
@@ -226,6 +241,26 @@ def build_blocks(cfg: dict[str, Any]) -> Path:
             tau = np.full(n_idx.size, np.nan, dtype=float)
             tau_amp = np.full(n_idx.size, np.nan, dtype=float)
 
+        if solve_success:
+            tau_sq = np.square(tau)
+            lam_sq = np.square(lam)
+            kappa = np.asarray(
+                a_nn.transpose() @ tau_sq + a_en.transpose() @ lam_sq - tau_sq,
+                dtype=float,
+            )
+        else:
+            kappa = np.full(n_idx.size, np.nan, dtype=float)
+
+        chi_solve_success = True
+        chi_solve_note = "ok"
+        try:
+            chi = spla.spsolve(m, kappa)
+            chi = np.asarray(chi, dtype=float)
+        except Exception as exc:
+            chi_solve_success = False
+            chi_solve_note = str(exc)
+            chi = np.full(n_idx.size, np.nan, dtype=float)
+
         spectral_radius, spectral_method = _spectral_radius_estimate(a_nn_sp)
         cond_est = _condition_number_estimate(m)
 
@@ -238,10 +273,16 @@ def build_blocks(cfg: dict[str, Any]) -> Path:
         v_scaled_n = vc_n * pct_change_v_n
         c_n = np.full(n_idx.size, np.nan, dtype=float)
         c_rhs = v_scaled_n.copy()
-        countries = sorted({_country_from_label(label) for label in labels_n if _country_from_label(label)})
+        countries = sorted(
+            {_country_from_label(label) for label in labels_n if _country_from_label(label)}
+        )
         country_missing_pct = int(
             sum(
-                np.isnan(c_rhs[[i for i, label in enumerate(labels_n) if label.startswith(f"{country}_")]]).any()
+                np.isnan(
+                    c_rhs[
+                        [i for i, label in enumerate(labels_n) if label.startswith(f"{country}_")]
+                    ]
+                ).any()
                 for country in countries
             )
         )
@@ -291,7 +332,9 @@ def build_blocks(cfg: dict[str, Any]) -> Path:
 
         c_country_df = pd.DataFrame(c_country_rows)
         if not c_country_df.empty:
-            c_country_df = c_country_df.sort_values(["country", "index_in_country"]).reset_index(drop=True)
+            c_country_df = c_country_df.sort_values(["country", "index_in_country"]).reset_index(
+                drop=True
+            )
         c_country_path = out_dir / f"blocks_{year}_country_c.parquet"
         c_country_df.to_parquet(c_country_path, index=False)
 
@@ -345,7 +388,9 @@ def build_blocks(cfg: dict[str, Any]) -> Path:
 
         c_gdp_country_df = pd.DataFrame(c_gdp_country_rows)
         if not c_gdp_country_df.empty:
-            c_gdp_country_df = c_gdp_country_df.sort_values(["country", "index_in_country"]).reset_index(drop=True)
+            c_gdp_country_df = c_gdp_country_df.sort_values(
+                ["country", "index_in_country"]
+            ).reset_index(drop=True)
         c_gdp_country_path = out_dir / f"blocks_{year}_country_c_gdp.parquet"
         c_gdp_country_df.to_parquet(c_gdp_country_path, index=False)
 
@@ -356,6 +401,8 @@ def build_blocks(cfg: dict[str, Any]) -> Path:
             tau=tau,
             tau_dir=tau_dir,
             tau_amp=tau_amp,
+            kappa=kappa,
+            chi=chi,
             idx_N=n_idx,
             idx_E=e_idx,
             lambda_E=lam,
@@ -398,9 +445,17 @@ def build_blocks(cfg: dict[str, Any]) -> Path:
                 "tau_inf_count": int(np.isinf(tau).sum()),
                 "tau_dir_nan_count": int(np.isnan(tau_dir).sum()),
                 "tau_amp_nan_count": int(np.isnan(tau_amp).sum()),
+                "kappa_nan_count": int(np.isnan(kappa).sum()),
+                "kappa_inf_count": int(np.isinf(kappa).sum()),
+                "chi_solve_success": chi_solve_success,
+                "chi_solve_note": chi_solve_note,
+                "chi_nan_count": int(np.isnan(chi).sum()),
+                "chi_inf_count": int(np.isinf(chi).sum()),
                 "tau_mean": float(np.nanmean(tau)),
                 "tau_dir_mean": float(np.nanmean(tau_dir)),
                 "tau_amp_mean": float(np.nanmean(tau_amp)),
+                "kappa_mean": float(np.nanmean(kappa)),
+                "chi_mean": float(np.nanmean(chi)),
                 "raw_zero_out_count": zero_out_count,
                 "country_solve_ok": country_solve_ok,
                 "country_solve_fail": country_solve_fail,
@@ -428,7 +483,8 @@ def build_blocks(cfg: dict[str, Any]) -> Path:
 
     if not summary_rows:
         raise ValueError(
-            f"No yearly A artifacts found in {a_dir}. Expected files like A_<year>.npz and A_<year>_meta.parquet."
+            f"No yearly A artifacts found in {a_dir}. "
+            "Expected files like A_<year>.npz and A_<year>_meta.parquet."
         )
 
     summary_df = pd.DataFrame(summary_rows).sort_values("year").reset_index(drop=True)

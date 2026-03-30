@@ -138,6 +138,7 @@ io-net eda --config config/default.yaml
 io-net build-a --config config/default.yaml
 io-net build-blocks --config config/default.yaml
 io-net build-xi --config config/default.yaml
+io-net build-zeta --config config/default.yaml
 io-net build-c --config config/default.yaml
 io-net build-c-diff --config config/default.yaml
 io-net build-real-gdp --config config/default.yaml
@@ -151,11 +152,12 @@ Recommended order:
 2. `io-net build-a`
 3. `io-net build-blocks`
 4. `io-net build-xi`
-5. `io-net build-c`
-6. `io-net build-c-diff`
-7. `io-net build-real-gdp`
-8. `io-net build-output-gap`
-9. `io-net build-policy-rates`
+5. `io-net build-zeta`
+6. `io-net build-c`
+7. `io-net build-c-diff`
+8. `io-net build-real-gdp`
+9. `io-net build-output-gap`
+10. `io-net build-policy-rates`
 
 ## Build Outputs
 
@@ -198,6 +200,8 @@ Stored arrays include:
 - `tau`
 - `tau_dir`
 - `tau_amp`
+- `kappa`
+- `chi`
 - `lambda_E`
 - `v_over_out_N`
 - `pct_change_v_N`
@@ -227,6 +231,18 @@ Important output fields include:
 - build timestamp and git commit metadata
 
 Possible `status` values include `ok`, `missing_hfce_column`, and `zero_hfce_mass`.
+
+### `build-zeta`
+
+Aggregates sector-level `chi` objects to country-year `zeta` using HFCE weights.
+
+Outputs under `data/processed/zeta/<variant>`:
+- `zeta_by_country_year.parquet`
+- `weights_diagnostics.parquet`
+- `weights_by_country_sector.parquet`
+- `zeta_summary.csv`
+
+Possible `status` values include `ok`, `missing_hfce_column`, `zero_hfce_mass`, and `missing_chi_vector`.
 
 ### `build-c`
 
@@ -456,8 +472,12 @@ Current notebooks include:
 - `panel_cumulative_local_projections.ipynb`
 - `tau_bubble_chart.ipynb`
 - `tau_bubble_all_countries.ipynb`
+- `chi_bubble_chart.ipynb`
+- `chi_bubble_all_countries.ipynb`
 - `xi_line_chart.ipynb`
 - `xi_phase_map.ipynb`
+- `zeta_line_chart.ipynb`
+- `zeta_phase_map.ipynb`
 - `oecd_stan.ipynb`
 
 Current LP notebook conventions:
@@ -470,12 +490,16 @@ Current LP notebook conventions:
 Visualization helpers live mainly in:
 - `src/io_networks/viz.py`
 - `src/io_networks/viz_xi.py`
+- `src/io_networks/viz_zeta.py`
 
 These support:
 - single-country `tau` bubble charts
+- single-country `chi` bubble charts
 - all-country bubble and boxen comparisons
 - xi line charts
 - xi phase-map style plots
+- zeta line charts
+- zeta phase-map style plots using lagged `zeta` on the x-axis and current `zeta` on the y-axis
 
 ## Testing and Linting
 
@@ -500,7 +524,7 @@ Current automated LP coverage includes:
 ## Troubleshooting
 
 - If a downstream build step cannot find inputs, run the upstream steps first.
-- If `build-xi`, `build-c`, or `build-c-diff` returns non-`ok` statuses, inspect the corresponding diagnostics parquet files and summary CSVs.
+- If `build-xi`, `build-zeta`, `build-c`, or `build-c-diff` returns non-`ok` statuses, inspect the corresponding diagnostics parquet files and summary CSVs.
 - If a control merge fails in LP code, check both the merge keys and `merge_key_columns` against the source file headers.
 - If local projections fail after lead and lag construction, reduce horizons or lag counts, or inspect missingness after merges.
 - If clustered LP inference fails, make sure the estimation sample still contains at least two countries and more rows than regressors after fixed effects and lags are added.
