@@ -470,6 +470,8 @@ Current notebooks include:
 - `lagged_xi_oil_cpi_minus_c_diff_ols.ipynb`
 - `panel_local_projections.ipynb`
 - `panel_cumulative_local_projections.ipynb`
+- `panel_cumulative_local_projections_oil2.ipynb`
+- `panel_cumulative_local_projections_iv_oil2.ipynb`
 - `tau_bubble_chart.ipynb`
 - `tau_bubble_all_countries.ipynb`
 - `chi_bubble_chart.ipynb`
@@ -486,6 +488,8 @@ Current LP notebook conventions:
 - controls that enter the regression are listed separately in `regression_controls`
 - the current quarterly controls are `exchange_rate`, `output_gap`, and `policy_rate`
 - output-gap and policy-rate control files are built from raw source data via the CLI commands above
+- the two `oil2` cumulative LP notebooks now replace the plain `oil2` regressor with `zeta_x_oil2`
+- in those notebooks, annual `zeta` is merged by `country` and `year`, lagged one year within country, and then interacted with quarterly `oil_pct_change ** 2`
 
 Visualization helpers live mainly in:
 - `src/io_networks/viz.py`
