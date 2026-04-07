@@ -13,11 +13,13 @@ if str(SRC) not in sys.path:
 
 from io_networks.local_projections import (
     build_panel_lp_dataset,
+    fit_cumulative_panel_local_projections,
     fit_cumulative_panel_local_projections_iv,
     fit_panel_local_projections,
     fit_panel_local_projections_iv,
 )
 from io_networks.local_projections import compare_horizon0_to_run_ols
+from io_networks.regression import run_ols
 
 
 def test_build_panel_lp_dataset_merges_optional_controls():
@@ -537,6 +539,33 @@ def test_compare_horizon0_to_run_ols_matches_exactly():
     assert abs(comparison.loc[0, "difference"]) < 1e-12
 
 
+def test_run_ols_supports_two_way_clustered_standard_errors():
+    countries = ["AAA", "BBB", "CCC"]
+    years = list(range(2000, 2008))
+    rows = []
+    for country_idx, country in enumerate(countries):
+        for year_idx, year in enumerate(years):
+            rows.append(
+                {
+                    "country": country,
+                    "year": year,
+                    "cpi_pct_change": 0.03 + 0.01 * year_idx + 0.005 * country_idx,
+                    "xi_x_oil": 0.10 + 0.02 * year_idx + 0.01 * country_idx,
+                }
+            )
+
+    model, coef_df = run_ols(
+        pd.DataFrame(rows),
+        cpi_lags=1,
+        include_country_fe=True,
+        regressand="cpi",
+        cov_type="cluster_country_time",
+    )
+
+    assert float(model.nobs) > 0
+    assert "std_err_cluster_country_time" in coef_df.columns
+
+
 def test_fit_panel_local_projections_iv_returns_all_horizons_and_terms():
     rows = []
     periods = ["2000-Q1", "2000-Q2", "2000-Q3", "2000-Q4", "2001-Q1", "2001-Q2", "2001-Q3", "2001-Q4"]
@@ -575,6 +604,111 @@ def test_fit_panel_local_projections_iv_returns_all_horizons_and_terms():
     horizon0_terms = set(coef_df.loc[coef_df["horizon"] == 0, "term"])
     assert "xi_x_oil" in horizon0_terms
     assert "xi_x_oil_lag1" in horizon0_terms
+
+
+def test_fit_panel_local_projections_supports_two_way_clustered_standard_errors():
+    rows = []
+    periods = ["2000-Q1", "2000-Q2", "2000-Q3", "2000-Q4", "2001-Q1", "2001-Q2", "2001-Q3", "2001-Q4"]
+    for country_idx, country in enumerate(["AAA", "BBB", "CCC", "DDD"]):
+        for period_idx, period in enumerate(periods):
+            year = int(period[:4])
+            quarter = int(period[-1])
+            rows.append(
+                {
+                    "country": country,
+                    "year": year,
+                    "period": period,
+                    "time_index": year * 4 + quarter - 1,
+                    "cpi_pct_change": 0.03 + 0.01 * period_idx + 0.005 * country_idx,
+                    "xi_x_oil": 0.10 + 0.02 * period_idx + 0.01 * country_idx,
+                }
+            )
+
+    irf_df, coef_df, models = fit_panel_local_projections(
+        pd.DataFrame(rows),
+        horizons=2,
+        y_lags=1,
+        include_country_fe=True,
+        include_year_fe=True,
+        cov_type="cluster_country_time",
+    )
+
+    assert irf_df["horizon"].tolist() == [0, 1, 2]
+    assert "std_err_cluster_country_time" in coef_df.columns
+    assert set(models) == {0, 1, 2}
+
+
+def test_fit_panel_local_projections_iv_supports_two_way_clustered_standard_errors():
+    rows = []
+    periods = ["2000-Q1", "2000-Q2", "2000-Q3", "2000-Q4", "2001-Q1", "2001-Q2", "2001-Q3", "2001-Q4"]
+    for country_idx, country in enumerate(["AAA", "BBB", "CCC", "DDD"]):
+        for period_idx, period in enumerate(periods):
+            year = int(period[:4])
+            quarter = int(period[-1])
+            rows.append(
+                {
+                    "country": country,
+                    "year": year,
+                    "period": period,
+                    "time_index": year * 4 + quarter - 1,
+                    "cpi_pct_change": 0.03 + 0.01 * period_idx + 0.005 * country_idx,
+                    "xi_x_oil": 0.10 + 0.02 * period_idx + 0.01 * country_idx,
+                    "xi_x_news": 0.12 + 0.015 * period_idx + 0.008 * country_idx,
+                }
+            )
+
+    irf_df, coef_df, models = fit_panel_local_projections_iv(
+        pd.DataFrame(rows),
+        horizons=2,
+        y_lags=1,
+        shock_lags=1,
+        include_country_fe=True,
+        include_year_fe=False,
+        cov_type="cluster_country_time",
+    )
+
+    assert irf_df["horizon"].tolist() == [0, 1, 2]
+    assert "std_err_cluster_country_time" in coef_df.columns
+    assert set(models) == {0, 1, 2}
+
+
+def test_fit_cumulative_panel_local_projections_supports_two_way_clustered_standard_errors():
+    rows = []
+    periods = [f"2000-Q{q}" for q in [1, 2, 3, 4]] + [f"2001-Q{q}" for q in [1, 2, 3, 4]] + [f"2002-Q{q}" for q in [1, 2, 3, 4]]
+    for country_idx, country in enumerate(["AAA", "BBB", "CCC", "DDD"]):
+        for period_idx, period in enumerate(periods):
+            year = int(period[:4])
+            quarter = int(period[-1])
+            rows.append(
+                {
+                    "country": country,
+                    "year": year,
+                    "period": period,
+                    "time_index": year * 4 + quarter - 1,
+                    "cpi_pct_change": 0.02 + 0.004 * period_idx + 0.002 * country_idx,
+                    "xi_x_oil": 0.10 + 0.01 * period_idx + 0.005 * country_idx,
+                }
+            )
+
+    df = pd.DataFrame(rows)
+    for horizon in range(3):
+        df[f"cum_cpi_lead{horizon}"] = (
+            df.groupby("country")["cpi_pct_change"]
+            .transform(lambda series, h=horizon: sum(series.shift(-step) for step in range(h + 1)))
+        )
+
+    irf_df, coef_df, models = fit_cumulative_panel_local_projections(
+        df,
+        horizons=2,
+        y_lags=1,
+        include_country_fe=True,
+        include_time_fe=True,
+        cov_type="cluster_country_time",
+    )
+
+    assert irf_df["horizon"].tolist() == [0, 1, 2]
+    assert "std_err_cluster_country_time" in coef_df.columns
+    assert set(models) == {0, 1, 2}
 
 
 def test_fit_cumulative_panel_local_projections_iv_preserves_irf_shape():
@@ -617,3 +751,44 @@ def test_fit_cumulative_panel_local_projections_iv_preserves_irf_shape():
     assert required_irf_cols.issubset(irf_df.columns)
     assert set(irf_df["term"]) == {"xi_x_oil"}
     assert "xi_x_oil_lag1" in set(coef_df.loc[coef_df["horizon"] == 0, "term"])
+
+
+def test_fit_cumulative_panel_local_projections_iv_supports_two_way_clustered_standard_errors():
+    rows = []
+    periods = [f"2000-Q{q}" for q in [1, 2, 3, 4]] + [f"2001-Q{q}" for q in [1, 2, 3, 4]] + [f"2002-Q{q}" for q in [1, 2, 3, 4]]
+    for country_idx, country in enumerate(["AAA", "BBB", "CCC", "DDD"]):
+        for period_idx, period in enumerate(periods):
+            year = int(period[:4])
+            quarter = int(period[-1])
+            rows.append(
+                {
+                    "country": country,
+                    "year": year,
+                    "period": period,
+                    "time_index": year * 4 + quarter - 1,
+                    "cpi_pct_change": 0.02 + 0.004 * period_idx + 0.002 * country_idx,
+                    "xi_x_oil": 0.10 + 0.01 * period_idx + 0.005 * country_idx,
+                    "xi_x_news": 0.08 + 0.012 * period_idx + 0.004 * country_idx,
+                }
+            )
+
+    df = pd.DataFrame(rows)
+    for horizon in range(3):
+        df[f"cum_cpi_lead{horizon}"] = (
+            df.groupby("country")["cpi_pct_change"]
+            .transform(lambda series, h=horizon: sum(series.shift(-step) for step in range(h + 1)))
+        )
+
+    irf_df, coef_df, models = fit_cumulative_panel_local_projections_iv(
+        df,
+        horizons=2,
+        y_lags=1,
+        shock_lags=1,
+        include_country_fe=True,
+        include_time_fe=False,
+        cov_type="cluster_country_time",
+    )
+
+    assert irf_df["horizon"].tolist() == [0, 1, 2]
+    assert "std_err_cluster_country_time" in coef_df.columns
+    assert set(models) == {0, 1, 2}

@@ -90,7 +90,7 @@ def build_xi(cfg: dict[str, Any]) -> Path:
             continue
 
         arr = np.load(blocks_npz)
-        required_arrays = {"tau", "tau_dir", "tau_amp"}
+        required_arrays = {"tau", "tau_dir", "tau_amp", "lambda_E"}
         missing = required_arrays - set(arr.files)
         if missing:
             raise ValueError(
@@ -101,26 +101,42 @@ def build_xi(cfg: dict[str, Any]) -> Path:
         tau = arr["tau"]
         tau_dir = arr["tau_dir"]
         tau_amp = arr["tau_amp"]
+        lambda_e = arr["lambda_E"]
 
         meta = pd.read_parquet(blocks_meta)
         n_meta = meta[meta["group"] == "N"].sort_values("index_in_group").reset_index(drop=True)
+        e_meta = meta[meta["group"] == "E"].sort_values("index_in_group").reset_index(drop=True)
         labels_n = n_meta["label"].astype(str).tolist()
+        labels_e = e_meta["label"].astype(str).tolist()
 
         if len(labels_n) != len(tau):
             raise ValueError(
                 f"Year {year}: label count {len(labels_n)} does not match tau length {len(tau)}"
             )
+        if len(labels_e) != len(lambda_e):
+            raise ValueError(
+                f"Year {year}: label count {len(labels_e)} does not match lambda length {len(lambda_e)}"
+            )
 
         tau_s = pd.Series(tau, index=labels_n, dtype=float)
         tau_dir_s = pd.Series(tau_dir, index=labels_n, dtype=float)
         tau_amp_s = pd.Series(tau_amp, index=labels_n, dtype=float)
+        lambda_e_s = pd.Series(lambda_e, index=labels_e, dtype=float)
 
-        countries = sorted({_country_from_label(label) for label in labels_n if _country_from_label(label)})
+        countries = sorted(
+            {
+                _country_from_label(label)
+                for label in [*labels_n, *labels_e]
+                if _country_from_label(label)
+            }
+        )
 
         hfce_frame, hfce_cols_present = _load_hfce_frame(raw_file, countries)
 
         for country in countries:
-            labels_country = [label for label in labels_n if label.startswith(f"{country}_")]
+            labels_country_n = [label for label in labels_n if label.startswith(f"{country}_")]
+            labels_country_e = [label for label in labels_e if label.startswith(f"{country}_")]
+            labels_country_all = [*labels_country_n, *labels_country_e]
             hfce_col = f"{country}_HFCE"
             has_hfce_column = hfce_col in hfce_cols_present
 
@@ -132,9 +148,11 @@ def build_xi(cfg: dict[str, Any]) -> Path:
                         "variant": variant,
                         "xi": np.nan,
                         "xi_dir": np.nan,
+                        "xi_amp_1": np.nan,
+                        "xi_amp_2": np.nan,
                         "xi_amp": np.nan,
                         "identity_residual": np.nan,
-                        "n_sectors_used": len(labels_country),
+                        "n_sectors_used": len(labels_country_all),
                         "status": "missing_hfce_column",
                         "build_timestamp_utc": build_time,
                         "git_commit": commit_hash,
@@ -150,7 +168,7 @@ def build_xi(cfg: dict[str, Any]) -> Path:
                         "weight_sum_raw": np.nan,
                         "weight_sum_norm": np.nan,
                         "n_positive_weights": 0,
-                        "n_zero_weights": len(labels_country),
+                        "n_zero_weights": len(labels_country_all),
                         "n_negative_clipped": np.nan,
                         "status": "missing_hfce_column",
                         "build_timestamp_utc": build_time,
@@ -159,13 +177,13 @@ def build_xi(cfg: dict[str, Any]) -> Path:
                 )
                 continue
 
-            raw_weights = pd.to_numeric(
-                hfce_frame.reindex(labels_country)[hfce_col], errors="coerce"
+            raw_weights_all = pd.to_numeric(
+                hfce_frame.reindex(labels_country_all)[hfce_col], errors="coerce"
             ).fillna(0.0)
 
-            negative_count = int((raw_weights < 0).sum())
-            raw_weights = raw_weights.clip(lower=0.0)
-            raw_sum = float(raw_weights.sum())
+            negative_count = int((raw_weights_all < 0).sum())
+            raw_weights_all = raw_weights_all.clip(lower=0.0)
+            raw_sum = float(raw_weights_all.sum())
 
             if raw_sum <= 0.0:
                 xi_rows.append(
@@ -175,9 +193,11 @@ def build_xi(cfg: dict[str, Any]) -> Path:
                         "variant": variant,
                         "xi": np.nan,
                         "xi_dir": np.nan,
+                        "xi_amp_1": np.nan,
+                        "xi_amp_2": np.nan,
                         "xi_amp": np.nan,
                         "identity_residual": np.nan,
-                        "n_sectors_used": len(labels_country),
+                        "n_sectors_used": len(labels_country_all),
                         "status": "zero_hfce_mass",
                         "build_timestamp_utc": build_time,
                         "git_commit": commit_hash,
@@ -193,7 +213,7 @@ def build_xi(cfg: dict[str, Any]) -> Path:
                         "weight_sum_raw": raw_sum,
                         "weight_sum_norm": np.nan,
                         "n_positive_weights": 0,
-                        "n_zero_weights": len(labels_country),
+                        "n_zero_weights": len(labels_country_all),
                         "n_negative_clipped": negative_count,
                         "status": "zero_hfce_mass",
                         "build_timestamp_utc": build_time,
@@ -202,17 +222,24 @@ def build_xi(cfg: dict[str, Any]) -> Path:
                 )
                 continue
 
-            weights_norm = raw_weights / raw_sum
+            weights_norm_all = raw_weights_all / raw_sum
 
-            tau_c = tau_s.reindex(labels_country).to_numpy(dtype=float)
-            tau_dir_c = tau_dir_s.reindex(labels_country).to_numpy(dtype=float)
-            tau_amp_c = tau_amp_s.reindex(labels_country).to_numpy(dtype=float)
-            w = weights_norm.to_numpy(dtype=float)
+            weights_norm_n = weights_norm_all.reindex(labels_country_n).fillna(0.0)
+            weights_norm_e = weights_norm_all.reindex(labels_country_e).fillna(0.0)
 
-            xi = float(np.dot(w, tau_c))
-            xi_dir = float(np.dot(w, tau_dir_c))
-            xi_amp = float(np.dot(w, tau_amp_c))
-            residual = float(xi - (xi_dir + xi_amp))
+            tau_c = tau_s.reindex(labels_country_n).to_numpy(dtype=float)
+            tau_dir_c = tau_dir_s.reindex(labels_country_n).to_numpy(dtype=float)
+            tau_amp_c = tau_amp_s.reindex(labels_country_n).to_numpy(dtype=float)
+            lambda_c = lambda_e_s.reindex(labels_country_e).to_numpy(dtype=float)
+            w_n = weights_norm_n.to_numpy(dtype=float)
+            w_e = weights_norm_e.to_numpy(dtype=float)
+
+            xi_dir = float(np.dot(w_e, lambda_c))
+            xi_amp_1 = float(np.dot(w_n, tau_dir_c))
+            xi_amp_2 = float(np.dot(w_n, tau_amp_c))
+            xi_amp = float(np.dot(w_n, tau_c))
+            xi = float(xi_dir + xi_amp)
+            residual = float(xi - (xi_dir + xi_amp_1 + xi_amp_2))
 
             xi_rows.append(
                 {
@@ -221,9 +248,11 @@ def build_xi(cfg: dict[str, Any]) -> Path:
                     "variant": variant,
                     "xi": xi,
                     "xi_dir": xi_dir,
+                    "xi_amp_1": xi_amp_1,
+                    "xi_amp_2": xi_amp_2,
                     "xi_amp": xi_amp,
                     "identity_residual": residual,
-                    "n_sectors_used": len(labels_country),
+                    "n_sectors_used": len(labels_country_all),
                     "status": "ok",
                     "build_timestamp_utc": build_time,
                     "git_commit": commit_hash,
@@ -234,43 +263,71 @@ def build_xi(cfg: dict[str, Any]) -> Path:
                 {
                     "year": year,
                     "country": country,
-                    "variant": variant,
-                    "hfce_column": hfce_col,
-                    "has_hfce_column": True,
-                    "weight_sum_raw": raw_sum,
-                    "weight_sum_norm": float(weights_norm.sum()),
-                    "n_positive_weights": int((weights_norm > 0).sum()),
-                    "n_zero_weights": int((weights_norm == 0).sum()),
-                    "n_negative_clipped": negative_count,
-                    "status": "ok",
-                    "build_timestamp_utc": build_time,
-                    "git_commit": commit_hash,
-                }
-            )
+                        "variant": variant,
+                        "hfce_column": hfce_col,
+                        "has_hfce_column": True,
+                        "weight_sum_raw": raw_sum,
+                        "weight_sum_norm": float(weights_norm_all.sum()),
+                        "n_positive_weights": int((weights_norm_all > 0).sum()),
+                        "n_zero_weights": int((weights_norm_all == 0).sum()),
+                        "n_negative_clipped": negative_count,
+                        "status": "ok",
+                        "build_timestamp_utc": build_time,
+                        "git_commit": commit_hash,
+                    }
+                )
 
-            for label, wr, wn, t, td, ta in zip(
-                labels_country,
-                raw_weights.to_numpy(dtype=float),
-                w,
-                tau_c,
-                tau_dir_c,
-                tau_amp_c,
-                strict=True,
-            ):
+            for label in labels_country_n:
+                wr = float(raw_weights_all.get(label, 0.0))
+                wn = float(weights_norm_all.get(label, 0.0))
+                t = float(tau_s.get(label, np.nan))
+                t_dir = float(tau_dir_s.get(label, np.nan))
+                t_amp = float(tau_amp_s.get(label, np.nan))
                 weights_rows.append(
                     {
                         "year": year,
                         "country": country,
                         "variant": variant,
+                        "sector_group": "N",
                         "sector_label": label,
-                        "weight_raw": float(wr),
-                        "weight_norm": float(wn),
-                        "tau": float(t),
-                        "tau_dir": float(td),
-                        "tau_amp": float(ta),
+                        "weight_raw": wr,
+                        "weight_norm": wn,
+                        "tau": t,
+                        "tau_dir": t_dir,
+                        "tau_amp": t_amp,
+                        "lambda": np.nan,
                         "contrib_xi": float(wn * t),
-                        "contrib_xi_dir": float(wn * td),
-                        "contrib_xi_amp": float(wn * ta),
+                        "contrib_xi_dir": 0.0,
+                        "contrib_xi_amp_1": float(wn * t_dir),
+                        "contrib_xi_amp_2": float(wn * t_amp),
+                        "contrib_xi_amp": float(wn * t),
+                        "build_timestamp_utc": build_time,
+                        "git_commit": commit_hash,
+                    }
+                )
+
+            for label in labels_country_e:
+                wr = float(raw_weights_all.get(label, 0.0))
+                wn = float(weights_norm_all.get(label, 0.0))
+                lam = float(lambda_e_s.get(label, np.nan))
+                weights_rows.append(
+                    {
+                        "year": year,
+                        "country": country,
+                        "variant": variant,
+                        "sector_group": "E",
+                        "sector_label": label,
+                        "weight_raw": wr,
+                        "weight_norm": wn,
+                        "tau": np.nan,
+                        "tau_dir": np.nan,
+                        "tau_amp": np.nan,
+                        "lambda": lam,
+                        "contrib_xi": float(wn * lam),
+                        "contrib_xi_dir": float(wn * lam),
+                        "contrib_xi_amp_1": 0.0,
+                        "contrib_xi_amp_2": 0.0,
+                        "contrib_xi_amp": 0.0,
                         "build_timestamp_utc": build_time,
                         "git_commit": commit_hash,
                     }

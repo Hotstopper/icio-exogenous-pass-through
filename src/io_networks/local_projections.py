@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from statsmodels.sandbox.regression.gmm import IV2SLS
@@ -283,7 +284,6 @@ def _build_lagged_columns(
 
     control_cols: list[str] = []
     for control in controls:
-        control_cols.append(control)
         lag_count = control_lags[control] if isinstance(control_lags, dict) else int(control_lags)
         if lag_count < 0:
             raise ValueError(f"Control lag count must be >= 0 for '{control}', got {lag_count}")
@@ -343,14 +343,65 @@ def _build_fe_design(
     return design, fe_cols
 
 
-def _validate_cluster_design(design: pd.DataFrame, x_cols: list[str], *, horizon: int) -> None:
-    if design["country"].nunique() < 2:
-        raise ValueError("cluster_country requires at least two countries in the estimation sample.")
-    if len(design) <= len(x_cols):
-        raise ValueError(
-            "cluster_country requires more estimation rows than regressors after fixed effects "
-            f"and lag construction. Got nobs={len(design)} and k={len(x_cols)} at horizon={horizon}."
+def _fit_lp_model_with_covariance(
+    base_model: Any,
+    design: pd.DataFrame,
+    x_cols: list[str],
+    *,
+    cov_type: str,
+    time_col: str,
+    horizon: int,
+) -> tuple[Any, str]:
+    try:
+        return regression._fit_linear_model_with_covariance(
+            base_model,
+            design,
+            x_cols,
+            cov_type=cov_type,
+            time_col=time_col,
         )
+    except ValueError as exc:
+        message = str(exc)
+        if "more estimation rows than regressors" in message:
+            raise ValueError(f"{message} at horizon={horizon}.") from exc
+        raise
+
+
+def _fit_lp_iv_model_with_covariance(
+    base_model: Any,
+    design: pd.DataFrame,
+    x_cols: list[str],
+    *,
+    cov_type: str,
+    time_col: str,
+    horizon: int,
+) -> tuple[Any, str]:
+    try:
+        regression._validate_cluster_design(design, x_cols, cov_type=cov_type, time_col=time_col)
+    except ValueError as exc:
+        message = str(exc)
+        if "more estimation rows than regressors" in message:
+            raise ValueError(f"{message} at horizon={horizon}.") from exc
+        raise
+
+    if cov_type == "cluster_country":
+        return (
+            base_model.fit().get_robustcov_results(cov_type="cluster", groups=design["country"]),
+            "std_err_cluster_country",
+        )
+    if cov_type == "cluster_country_time":
+        country_codes = pd.factorize(design["country"])[0].astype(np.int64, copy=False)
+        time_codes = pd.factorize(design[time_col])[0].astype(np.int64, copy=False)
+        groups = np.column_stack([country_codes, time_codes])
+        return (
+            base_model.fit().get_robustcov_results(cov_type="cluster", groups=groups),
+            "std_err_cluster_country_time",
+        )
+    raise ValueError(
+        f"Unsupported LP-IV cov_type '{cov_type}'. "
+        "Use 'cluster_country' or 'cluster_country_time'. "
+        "statsmodels IV2SLS robust HC estimators are not reliable in this environment."
+    )
 
 
 def _summarize_model_results(
@@ -586,15 +637,14 @@ def fit_panel_local_projections(
         y = design[dep_col]
         x = sm.add_constant(design[x_cols + fe_cols], has_constant="add")
         base_model = sm.OLS(y, x, missing="raise")
-        if cov_type == "cluster_country":
-            _validate_cluster_design(design, list(x.columns), horizon=horizon)
-            model = base_model.fit(cov_type="cluster", cov_kwds={"groups": design["country"]})
-            std_err_col = "std_err_cluster_country"
-        elif cov_type == "hc3":
-            model = base_model.fit(cov_type="HC3")
-            std_err_col = "std_err_hc3"
-        else:
-            raise ValueError(f"Unsupported cov_type '{cov_type}'. Use 'cluster_country' or 'hc3'.")
+        model, std_err_col = _fit_lp_model_with_covariance(
+            base_model,
+            design,
+            list(x.columns),
+            cov_type=cov_type,
+            time_col=resolved_time_col,
+            horizon=horizon,
+        )
 
         models[horizon] = model
         coef_df, irf_row = _summarize_model_results(
@@ -676,15 +726,14 @@ def fit_cumulative_panel_local_projections(
         y = pd.to_numeric(design[dep_col], errors="coerce")
         x = sm.add_constant(design[x_cols + fe_cols], has_constant="add")
         base_model = sm.OLS(y, x, missing="raise")
-        if cov_type == "cluster_country":
-            _validate_cluster_design(design, list(x.columns), horizon=horizon)
-            model = base_model.fit(cov_type="cluster", cov_kwds={"groups": design["country"]})
-            std_err_col = "std_err_cluster_country"
-        elif cov_type == "hc3":
-            model = base_model.fit(cov_type="HC3")
-            std_err_col = "std_err_hc3"
-        else:
-            raise ValueError(f"Unsupported cov_type '{cov_type}'.")
+        model, std_err_col = _fit_lp_model_with_covariance(
+            base_model,
+            design,
+            list(x.columns),
+            cov_type=cov_type,
+            time_col="time_index",
+            horizon=horizon,
+        )
 
         models[horizon] = model
         coef_df, irf_row = _summarize_model_results(
@@ -783,15 +832,14 @@ def fit_panel_local_projections_iv(
         x = sm.add_constant(design[endog_cols + exog_cols + fe_cols], has_constant="add")
         z = sm.add_constant(design[instrument_cols + exog_cols + fe_cols], has_constant="add")
         base_model = IV2SLS(y, x, z)
-        if cov_type == "cluster_country":
-            _validate_cluster_design(design, list(x.columns), horizon=horizon)
-            model = base_model.fit().get_robustcov_results(cov_type="cluster", groups=design["country"])
-            std_err_col = "std_err_cluster_country"
-        else:
-            raise ValueError(
-                f"Unsupported LP-IV cov_type '{cov_type}'. Use 'cluster_country'. "
-                "statsmodels IV2SLS robust HC estimators are not reliable in this environment."
-            )
+        model, std_err_col = _fit_lp_iv_model_with_covariance(
+            base_model,
+            design,
+            list(x.columns),
+            cov_type=cov_type,
+            time_col=resolved_time_col,
+            horizon=horizon,
+        )
 
         models[horizon] = model
         coef_df, irf_row = _summarize_model_results(
@@ -880,15 +928,14 @@ def fit_cumulative_panel_local_projections_iv(
         x = sm.add_constant(design[endog_cols + exog_cols + fe_cols], has_constant="add")
         z = sm.add_constant(design[instrument_cols + exog_cols + fe_cols], has_constant="add")
         base_model = IV2SLS(y, x, z)
-        if cov_type == "cluster_country":
-            _validate_cluster_design(design, list(x.columns), horizon=horizon)
-            model = base_model.fit().get_robustcov_results(cov_type="cluster", groups=design["country"])
-            std_err_col = "std_err_cluster_country"
-        else:
-            raise ValueError(
-                f"Unsupported cumulative LP-IV cov_type '{cov_type}'. Use 'cluster_country'. "
-                "statsmodels IV2SLS robust HC estimators are not reliable in this environment."
-            )
+        model, std_err_col = _fit_lp_iv_model_with_covariance(
+            base_model,
+            design,
+            list(x.columns),
+            cov_type=cov_type,
+            time_col="time_index",
+            horizon=horizon,
+        )
 
         models[horizon] = model
         coef_df, irf_row = _summarize_model_results(

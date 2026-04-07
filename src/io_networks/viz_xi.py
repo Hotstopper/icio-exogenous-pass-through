@@ -7,16 +7,30 @@ import pandas as pd
 
 from io_networks.paths import resolve_paths
 
-_ALLOWED_METRICS = {"xi", "xi_dir", "xi_amp", "share"}
+_ALLOWED_METRICS = {
+    "xi",
+    "xi_dir",
+    "xi_amp_1",
+    "xi_amp_2",
+    "xi_amp",
+    "share",
+    "share_amp_1",
+    "share_amp_2",
+}
 _ALLOWED_RATIO_MODES = {"amplification", "share"}
+_ALLOWED_SHARE_METRICS = {"share", "share_amp_1", "share_amp_2"}
 
 
 def _metric_label(metric: str) -> str:
     labels = {
         "xi": r"$\xi$",
         "xi_dir": r"$\xi_{dir}$",
+        "xi_amp_1": r"$\xi_{amp,1}$",
+        "xi_amp_2": r"$\xi_{amp,2}$",
         "xi_amp": r"$\xi_{amp}$",
         "share": r"$\xi_{amp} / \xi$",
+        "share_amp_1": r"$\xi_{amp,1} / \xi$",
+        "share_amp_2": r"$\xi_{amp,2} / \xi$",
     }
     return labels.get(metric, metric)
 
@@ -40,22 +54,39 @@ def load_xi_data(
     return pd.read_parquet(xi_path)
 
 
-def _ratio_label(ratio_mode: str) -> str:
-    labels = {
-        "amplification": r"$\xi / \xi_{dir}$",
-        "share": r"$\xi_{amp} / \xi$",
-    }
-    return labels.get(ratio_mode, ratio_mode)
+def _resolve_share_metric(ratio_mode: str, share_metric: str | None) -> str | None:
+    if ratio_mode not in _ALLOWED_RATIO_MODES:
+        raise ValueError(f"ratio_mode must be one of {sorted(_ALLOWED_RATIO_MODES)}")
+    if ratio_mode != "share":
+        return None
+    metric = "share" if share_metric is None else str(share_metric)
+    if metric not in _ALLOWED_SHARE_METRICS:
+        raise ValueError(f"share_metric must be one of {sorted(_ALLOWED_SHARE_METRICS)}")
+    return metric
+
+
+def _ratio_label(ratio_mode: str, share_metric: str | None = None) -> str:
+    if ratio_mode == "amplification":
+        return r"$\xi / \xi_{dir}$"
+    resolved_share_metric = _resolve_share_metric(ratio_mode, share_metric)
+    return _metric_label(resolved_share_metric or ratio_mode)
 
 
 def _prepare_xi_ratio_frame(
     df: pd.DataFrame,
     ratio_mode: str,
+    share_metric: str | None = None,
     only_ok: bool = True,
 ) -> pd.DataFrame:
-    if ratio_mode not in _ALLOWED_RATIO_MODES:
-        raise ValueError(f"ratio_mode must be one of {sorted(_ALLOWED_RATIO_MODES)}")
-    required = {"country", "year", "xi", "xi_dir", "xi_amp"}
+    resolved_share_metric = _resolve_share_metric(ratio_mode, share_metric)
+    required = {"country", "year", "xi", "xi_dir"}
+    if ratio_mode == "share":
+        if resolved_share_metric == "share":
+            required.add("xi_amp")
+        elif resolved_share_metric == "share_amp_1":
+            required.add("xi_amp_1")
+        elif resolved_share_metric == "share_amp_2":
+            required.add("xi_amp_2")
     missing = sorted(required.difference(df.columns))
     if missing:
         raise ValueError(f"Missing required columns for ratio computation: {missing}")
@@ -65,7 +96,12 @@ def _prepare_xi_ratio_frame(
     work["year"] = pd.to_numeric(work["year"], errors="coerce")
     work["xi"] = pd.to_numeric(work["xi"], errors="coerce")
     work["xi_dir"] = pd.to_numeric(work["xi_dir"], errors="coerce")
-    work["xi_amp"] = pd.to_numeric(work["xi_amp"], errors="coerce")
+    if "xi_amp" in work.columns:
+        work["xi_amp"] = pd.to_numeric(work["xi_amp"], errors="coerce")
+    if "xi_amp_1" in work.columns:
+        work["xi_amp_1"] = pd.to_numeric(work["xi_amp_1"], errors="coerce")
+    if "xi_amp_2" in work.columns:
+        work["xi_amp_2"] = pd.to_numeric(work["xi_amp_2"], errors="coerce")
 
     if only_ok and "status" in work.columns:
         work = work[work["status"] == "ok"].copy()
@@ -75,7 +111,12 @@ def _prepare_xi_ratio_frame(
         work["ratio"] = work["xi"] / denom
     else:
         denom = work["xi"].replace(0.0, np.nan)
-        work["ratio"] = work["xi_amp"] / denom
+        numerator_col = {
+            "share": "xi_amp",
+            "share_amp_1": "xi_amp_1",
+            "share_amp_2": "xi_amp_2",
+        }[resolved_share_metric or "share"]
+        work["ratio"] = work[numerator_col] / denom
 
     work = work.dropna(subset=["country", "year", "xi", "ratio"]).copy()
     work = work[np.isfinite(work["xi"]) & np.isfinite(work["ratio"])].copy()
@@ -85,11 +126,17 @@ def _prepare_xi_ratio_frame(
 def select_phase_map_countries(
     df: pd.DataFrame,
     ratio_mode: str = "share",
+    share_metric: str | None = None,
     base_countries: Iterable[str] = ("USA", "CHN"),
     only_ok: bool = True,
 ) -> list[str]:
     """Return placeholder countries: USA, CHN, median, q25, q75 by country-level ratio."""
-    work = _prepare_xi_ratio_frame(df=df, ratio_mode=ratio_mode, only_ok=only_ok)
+    work = _prepare_xi_ratio_frame(
+        df=df,
+        ratio_mode=ratio_mode,
+        share_metric=share_metric,
+        only_ok=only_ok,
+    )
     if work.empty:
         raise ValueError("No finite rows available for phase-map country selection.")
 
@@ -136,6 +183,7 @@ def plot_xi_phase_map(
     df: pd.DataFrame,
     countries: Iterable[str],
     ratio_mode: str = "share",
+    share_metric: str | None = None,
     only_ok: bool = True,
     title: str | None = None,
     cmap: str = "viridis",
@@ -163,7 +211,12 @@ def plot_xi_phase_map(
     except ImportError as exc:  # pragma: no cover
         raise ImportError("matplotlib is required for plotting. Install it in your .venv.") from exc
 
-    work = _prepare_xi_ratio_frame(df=df, ratio_mode=ratio_mode, only_ok=only_ok)
+    work = _prepare_xi_ratio_frame(
+        df=df,
+        ratio_mode=ratio_mode,
+        share_metric=share_metric,
+        only_ok=only_ok,
+    )
     if work.empty:
         raise ValueError("No finite rows available to plot phase map.")
 
@@ -283,11 +336,14 @@ def plot_xi_phase_map(
     ax.autoscale()
     ax.grid(alpha=0.25, linewidth=0.8)
     ax.set_xlabel(_metric_label("xi"), fontfamily="serif")
-    ax.set_ylabel(_ratio_label(ratio_mode), fontfamily="serif")
+    ax.set_ylabel(_ratio_label(ratio_mode, share_metric=share_metric), fontfamily="serif")
     if title:
         ax.set_title(title, fontfamily="serif")
     else:
-        ax.set_title(rf"Phase Map: {_ratio_label(ratio_mode)} vs $\xi$", fontfamily="serif")
+        ax.set_title(
+            rf"Phase Map: {_ratio_label(ratio_mode, share_metric=share_metric)} vs $\xi$",
+            fontfamily="serif",
+        )
 
     for tick in ax.get_xticklabels():
         tick.set_fontfamily("serif")
@@ -304,6 +360,242 @@ def plot_xi_phase_map(
     return ax
 
 
+def plot_xi_composition_map(
+    df: pd.DataFrame,
+    year: int,
+    ratio_mode: str = "share",
+    share_metric: str | None = None,
+    highlight_countries: Iterable[str] | None = None,
+    country_groups: dict[str, Iterable[str]] | None = None,
+    exclude_countries: Iterable[str] | None = None,
+    only_ok: bool = True,
+    title: str | None = None,
+    point_size_bg: float = 26.0,
+    point_size_hi: float = 44.0,
+    alpha_bg: float = 0.4,
+    alpha_hi: float = 0.95,
+    color_bg: str = "0.65",
+    show_legend: bool = True,
+    highlight_colors: dict[str, str] | None = None,
+    highlight_label_fontsize: float = 12.0,
+    label_dx_pts: float = 7.0,
+    label_dy_pts: float = 7.0,
+    label_bbox_alpha: float = 0.82,
+    ax: Any = None,
+) -> Any:
+    """Plot a single-year cross-country scatter with x=xi and y=selected ratio."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("matplotlib is required for plotting. Install it in your .venv.") from exc
+
+    work = _prepare_xi_ratio_frame(
+        df=df,
+        ratio_mode=ratio_mode,
+        share_metric=share_metric,
+        only_ok=only_ok,
+    )
+    if work.empty:
+        raise ValueError("No finite rows available to plot composition map.")
+
+    year_value = int(year)
+    plot = work[work["year"] == year_value].copy()
+    if plot.empty:
+        years = sorted(int(y) for y in work["year"].dropna().unique())
+        raise ValueError(f"No rows available for year={year_value}. Available years: {years}")
+
+    ex_set = set()
+    if exclude_countries:
+        ex_set = {str(c).upper() for c in exclude_countries}
+        plot = plot[~plot["country"].isin(ex_set)].copy()
+        if plot.empty:
+            raise ValueError("No rows available after applying exclude_countries.")
+
+    hi_order: list[str] = []
+    if highlight_countries:
+        seen = set()
+        for c in highlight_countries:
+            cu = str(c).upper()
+            if cu in ex_set or cu in seen:
+                continue
+            hi_order.append(cu)
+            seen.add(cu)
+
+    hi_set = set(hi_order)
+    bg = plot[~plot["country"].isin(hi_set)].copy()
+    hi = plot[plot["country"].isin(hi_set)].copy()
+
+    group_map: dict[str, str] = {}
+    group_order: list[str] = []
+    if country_groups:
+        seen_groups = set()
+        for group_name, members in country_groups.items():
+            group_key = str(group_name)
+            if group_key not in seen_groups:
+                group_order.append(group_key)
+                seen_groups.add(group_key)
+            for country in members:
+                cu = str(country).upper()
+                if cu not in ex_set and cu not in group_map:
+                    group_map[cu] = group_key
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(12, 8))
+
+    cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0", "C1", "C2", "C3", "C4"])
+    hi_color_map = {str(country).upper(): color for country, color in (highlight_colors or {}).items()}
+
+    if group_map:
+        grouped = plot[plot["country"].isin(group_map)].copy()
+        ungrouped = plot[~plot["country"].isin(group_map)].copy()
+        hi_ungrouped = hi[~hi["country"].isin(group_map)].copy()
+        bg_ungrouped = ungrouped[~ungrouped["country"].isin(hi_set)].copy()
+
+        if not bg_ungrouped.empty:
+            ax.scatter(
+                bg_ungrouped["xi"].to_numpy(dtype=float),
+                bg_ungrouped["ratio"].to_numpy(dtype=float),
+                s=point_size_bg,
+                color=color_bg,
+                alpha=alpha_bg,
+                edgecolors="none",
+                zorder=2,
+            )
+
+        for i, group_name in enumerate(group_order):
+            sub = grouped[grouped["country"].map(group_map) == group_name].copy()
+            if sub.empty:
+                continue
+            color = cycle[i % len(cycle)]
+            ax.scatter(
+                sub["xi"].to_numpy(dtype=float),
+                sub["ratio"].to_numpy(dtype=float),
+                s=point_size_bg,
+                color=color,
+                alpha=alpha_hi,
+                edgecolors="none",
+                zorder=3,
+                label=group_name,
+            )
+
+        handles, labels = ax.get_legend_handles_labels()
+        if handles and show_legend:
+            legend = ax.legend(frameon=False, title="Groups")
+            if legend.get_title() is not None:
+                legend.get_title().set_fontfamily("serif")
+            for txt in legend.get_texts():
+                txt.set_fontfamily("serif")
+
+        if hi_order:
+            hi_present = sorted(hi["country"].unique(), key=hi_order.index)
+            hi_ungrouped_present = [country for country in hi_present if country not in group_map]
+            for i, country in enumerate(hi_ungrouped_present):
+                sub = hi_ungrouped[hi_ungrouped["country"] == country]
+                if sub.empty:
+                    continue
+                color = hi_color_map.get(country, cycle[(len(group_order) + i) % len(cycle)])
+                x = float(sub["xi"].iloc[0])
+                y = float(sub["ratio"].iloc[0])
+                ax.scatter(
+                    [x],
+                    [y],
+                    s=point_size_hi,
+                    color=color,
+                    alpha=alpha_hi,
+                    edgecolors="none",
+                    zorder=4,
+                )
+
+            for country in hi_present:
+                sub = hi[hi["country"] == country]
+                if sub.empty:
+                    continue
+                x = float(sub["xi"].iloc[0])
+                y = float(sub["ratio"].iloc[0])
+                ax.annotate(
+                    country,
+                    xy=(x, y),
+                    xytext=(label_dx_pts, label_dy_pts),
+                    textcoords="offset points",
+                    ha="left",
+                    va="center",
+                    fontsize=highlight_label_fontsize,
+                    fontfamily="serif",
+                    bbox={
+                        "facecolor": "white",
+                        "edgecolor": "none",
+                        "alpha": label_bbox_alpha,
+                        "pad": 0.2,
+                    },
+                    zorder=5,
+                )
+    else:
+        if not bg.empty:
+            ax.scatter(
+                bg["xi"].to_numpy(dtype=float),
+                bg["ratio"].to_numpy(dtype=float),
+                s=point_size_bg,
+                color=color_bg,
+                alpha=alpha_bg,
+                edgecolors="none",
+                zorder=2,
+            )
+
+        if not hi.empty:
+            hi_present = sorted(hi["country"].unique(), key=hi_order.index)
+            for i, country in enumerate(hi_present):
+                sub = hi[hi["country"] == country]
+                if sub.empty:
+                    continue
+                color = hi_color_map.get(country, cycle[i % len(cycle)])
+                x = float(sub["xi"].iloc[0])
+                y = float(sub["ratio"].iloc[0])
+                ax.scatter(
+                    [x],
+                    [y],
+                    s=point_size_hi,
+                    color=color,
+                    alpha=alpha_hi,
+                    edgecolors="none",
+                    zorder=4,
+                )
+                ax.annotate(
+                    country,
+                    xy=(x, y),
+                    xytext=(label_dx_pts, label_dy_pts),
+                    textcoords="offset points",
+                    ha="left",
+                    va="center",
+                    fontsize=highlight_label_fontsize,
+                    fontfamily="serif",
+                    bbox={
+                        "facecolor": "white",
+                        "edgecolor": "none",
+                        "alpha": label_bbox_alpha,
+                        "pad": 0.2,
+                    },
+                    zorder=5,
+                )
+
+    ax.grid(alpha=0.25, linewidth=0.8)
+    ax.set_xlabel(_metric_label("xi"), fontfamily="serif")
+    ax.set_ylabel(_ratio_label(ratio_mode, share_metric=share_metric), fontfamily="serif")
+    if title:
+        ax.set_title(title, fontfamily="serif")
+    else:
+        ax.set_title(
+            rf"Composition Map: {_ratio_label(ratio_mode, share_metric=share_metric)} vs $\xi$ ({year_value})",
+            fontfamily="serif",
+        )
+
+    for tick in ax.get_xticklabels():
+        tick.set_fontfamily("serif")
+    for tick in ax.get_yticklabels():
+        tick.set_fontfamily("serif")
+
+    return ax
+
+
 def plot_xi_country_lines(
     df: pd.DataFrame,
     metric: str = "xi",
@@ -315,20 +607,35 @@ def plot_xi_country_lines(
     symlog_linthresh: float = 1e-3,
     log_ymin: float = 0.01,
     log_bottom_pad_factor: float = 0.92,
+    show_background: bool = True,
     alpha_bg: float = 0.18,
     lw_bg: float = 0.8,
     lw_hi: float = 2.6,
     use_end_labels: bool = True,
+    end_label_fontsize: float = 11.0,
     show_legend: bool = False,
     label_pad_years: float = 1.2,
+    reference_years: tuple[float, ...] = (2008.0, 2020.0),
+    reference_year_labels: dict[float, str] | None = None,
+    reference_label_y: float = 0.98,
+    reference_label_x_offset: float = 0.12,
+    reference_label_rotation: float = 90.0,
+    reference_label_fontsize: float = 10.0,
+    reference_label_color: str = "0.2",
+    reference_label_ha: str = "left",
+    reference_label_va: str = "top",
     ax: Any = None,
 ) -> Any:
-    """Plot country xi lines with gray background and highlighted countries."""
+    """Plot country xi lines with optional gray background and highlighted countries."""
     if metric not in _ALLOWED_METRICS:
         raise ValueError(f"metric must be one of {sorted(_ALLOWED_METRICS)}")
     required_cols = {"country", "year"}
     if metric == "share":
         required_cols.update({"xi", "xi_amp"})
+    elif metric == "share_amp_1":
+        required_cols.update({"xi", "xi_amp_1"})
+    elif metric == "share_amp_2":
+        required_cols.update({"xi", "xi_amp_2"})
     else:
         required_cols.add(metric)
     missing = sorted(required_cols.difference(df.columns))
@@ -349,6 +656,16 @@ def plot_xi_country_lines(
         work["xi_amp"] = pd.to_numeric(work["xi_amp"], errors="coerce")
         denom = work["xi"].replace(0.0, np.nan)
         work["share"] = work["xi_amp"] / denom
+    elif metric == "share_amp_1":
+        work["xi"] = pd.to_numeric(work["xi"], errors="coerce")
+        work["xi_amp_1"] = pd.to_numeric(work["xi_amp_1"], errors="coerce")
+        denom = work["xi"].replace(0.0, np.nan)
+        work["share_amp_1"] = work["xi_amp_1"] / denom
+    elif metric == "share_amp_2":
+        work["xi"] = pd.to_numeric(work["xi"], errors="coerce")
+        work["xi_amp_2"] = pd.to_numeric(work["xi_amp_2"], errors="coerce")
+        denom = work["xi"].replace(0.0, np.nan)
+        work["share_amp_2"] = work["xi_amp_2"] / denom
     else:
         work[metric] = pd.to_numeric(work[metric], errors="coerce")
 
@@ -397,16 +714,17 @@ def plot_xi_country_lines(
     countries = sorted(work["country"].unique())
     bg_countries = [c for c in countries if c not in hi_set]
 
-    for country in bg_countries:
-        sub = work[work["country"] == country].sort_values("year")
-        ax.plot(
-            sub["year"].to_numpy(dtype=float),
-            sub[metric].to_numpy(dtype=float),
-            color="0.5",
-            alpha=alpha_bg,
-            linewidth=lw_bg,
-            zorder=1,
-        )
+    if show_background:
+        for country in bg_countries:
+            sub = work[work["country"] == country].sort_values("year")
+            ax.plot(
+                sub["year"].to_numpy(dtype=float),
+                sub[metric].to_numpy(dtype=float),
+                color="0.5",
+                alpha=alpha_bg,
+                linewidth=lw_bg,
+                zorder=1,
+            )
 
     if hi_order:
         cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0", "C1", "C2", "C3", "C4"])
@@ -440,23 +758,23 @@ def plot_xi_country_lines(
             span = float(work[metric].max() - work[metric].min())
             min_gap = 0.02 * span if span > 0 else 0.0
             ordered = sorted(hi_endpoints, key=lambda t: t[2])
-            adjusted: list[tuple[str, float, float, str]] = []
+            adjusted: list[tuple[str, float, float, float, str]] = []
             prev_y: float | None = None
             for country, x_last, y_last, color in ordered:
-                y_adj = y_last if prev_y is None else max(y_last, prev_y + min_gap)
-                adjusted.append((country, x_last, y_adj, color))
-                prev_y = y_adj
+                y_label = y_last if prev_y is None else max(y_last, prev_y + min_gap)
+                adjusted.append((country, x_last, y_last, y_label, color))
+                prev_y = y_label
             x_last_global = float(work["year"].max())
             x_label = x_last_global + 0.35 * label_pad_years
-            for country, x_last, y_last, color in adjusted:
+            for country, x_last, y_last, y_label, color in adjusted:
                 ax.text(
                     x_label,
-                    y_last,
+                    y_label,
                     country,
                     va="center",
                     ha="left",
-                    color=color,
-                    fontsize=10,
+                    color="black",
+                    fontsize=end_label_fontsize,
                     fontfamily="serif",
                     clip_on=False,
                     bbox={
@@ -471,12 +789,37 @@ def plot_xi_country_lines(
                 # Thin connector from series endpoint to label zone.
                 ax.plot(
                     [x_last, x_label - 0.03 * label_pad_years],
-                    [y_last, y_last],
+                    [y_last, y_label],
                     color=color,
                     linewidth=0.8,
                     alpha=0.8,
                     zorder=3,
                 )
+
+    for ref_year in reference_years:
+        ax.axvline(
+            float(ref_year),
+            color="0.1",
+            linestyle="--",
+            linewidth=2.0,
+            alpha=0.35,
+            zorder=2,
+        )
+        if reference_year_labels and float(ref_year) in reference_year_labels:
+            ax.text(
+                float(ref_year) + reference_label_x_offset,
+                reference_label_y,
+                str(reference_year_labels[float(ref_year)]),
+                transform=ax.get_xaxis_transform(),
+                ha=reference_label_ha,
+                va=reference_label_va,
+                rotation=reference_label_rotation,
+                fontsize=reference_label_fontsize,
+                fontfamily="serif",
+                color=reference_label_color,
+                clip_on=False,
+                zorder=4,
+            )
 
     ax.grid(axis="y", which="major", alpha=0.25, linewidth=0.8)
     ax.set_xlabel("Year", fontfamily="serif")

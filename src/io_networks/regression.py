@@ -3,6 +3,7 @@
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
@@ -17,6 +18,72 @@ OIL_DEFAULT_BY_FREQ: dict[str, Path] = {
     'M': Path('data/processed/oil/monthly_oil.csv'),
     'Q': Path('data/processed/oil/quarterly_oil.csv'),
 }
+
+SUPPORTED_COV_TYPES = {'hc3', 'cluster_country', 'cluster_country_time'}
+
+
+def _validate_cluster_design(
+    design: pd.DataFrame,
+    x_cols: list[str],
+    *,
+    cov_type: str,
+    time_col: str | None = None,
+) -> None:
+    if cov_type == 'cluster_country':
+        if design['country'].nunique() < 2:
+            raise ValueError('cluster_country requires at least two countries in the estimation sample.')
+    elif cov_type == 'cluster_country_time':
+        if time_col is None:
+            raise ValueError('cluster_country_time requires a time_col.')
+        if design['country'].nunique() < 2:
+            raise ValueError('cluster_country_time requires at least two countries in the estimation sample.')
+        if design[time_col].nunique() < 2:
+            raise ValueError(
+                f"cluster_country_time requires at least two unique values in '{time_col}' "
+                'in the estimation sample.'
+            )
+    else:
+        raise ValueError(
+            f"Unsupported clustered cov_type '{cov_type}'. "
+            "Use 'cluster_country' or 'cluster_country_time'."
+        )
+
+    if len(design) <= len(x_cols):
+        raise ValueError(
+            f'{cov_type} requires more estimation rows than regressors after fixed effects '
+            f'and lag construction. Got nobs={len(design)} and k={len(x_cols)}.'
+        )
+
+
+def _fit_linear_model_with_covariance(
+    base_model,
+    design: pd.DataFrame,
+    x_cols: list[str],
+    *,
+    cov_type: str,
+    time_col: str | None = None,
+):
+    if cov_type == 'hc3':
+        return base_model.fit(cov_type='HC3'), 'std_err_hc3'
+    if cov_type == 'cluster_country':
+        _validate_cluster_design(design, x_cols, cov_type=cov_type)
+        return (
+            base_model.fit(cov_type='cluster', cov_kwds={'groups': design['country']}),
+            'std_err_cluster_country',
+        )
+    if cov_type == 'cluster_country_time':
+        _validate_cluster_design(design, x_cols, cov_type=cov_type, time_col=time_col)
+        country_codes = pd.factorize(design['country'])[0].astype(np.int64, copy=False)
+        time_codes = pd.factorize(design[time_col])[0].astype(np.int64, copy=False)
+        groups = np.column_stack([country_codes, time_codes])
+        return (
+            base_model.fit(cov_type='cluster', cov_kwds={'groups': groups}),
+            'std_err_cluster_country_time',
+        )
+    raise ValueError(
+        f"Unsupported cov_type '{cov_type}'. "
+        "Use 'hc3', 'cluster_country', or 'cluster_country_time'."
+    )
 
 
 def load_xi(path: Path) -> pd.DataFrame:
@@ -236,6 +303,7 @@ def run_ols(
     cpi_lags: int = 1,
     include_country_fe: bool = True,
     regressand: str = 'cpi',
+    cov_type: str = 'hc3',
 ):
     if cpi_lags < 0:
         raise ValueError(f'cpi_lags must be >= 0, got {cpi_lags}')
@@ -304,7 +372,7 @@ def run_ols(
         fe_cols = fe.columns.tolist()
         x_base = pd.concat([x_base, fe], axis=1)
 
-    design = pd.concat([work[['regressand']], x_base], axis=1).dropna()
+    design = pd.concat([work[['country', 'year', 'regressand']], x_base], axis=1).dropna()
     if design.empty:
         raise ValueError(
             'No rows left for OLS after applying lag and missing-data filters. '
@@ -313,14 +381,20 @@ def run_ols(
 
     y = design['regressand']
     x = sm.add_constant(design[x_cols + fe_cols], has_constant='add')
-    model = sm.OLS(y, x, missing='raise').fit(cov_type='HC3')
+    model, std_err_col = _fit_linear_model_with_covariance(
+        sm.OLS(y, x, missing='raise'),
+        design,
+        list(x.columns),
+        cov_type=cov_type,
+        time_col='year',
+    )
 
     ci = model.conf_int()
     coef = pd.DataFrame(
         {
             'term': model.params.index,
             'coef': model.params.values,
-            'std_err_hc3': model.bse.values,
+            std_err_col: model.bse.values,
             't': model.tvalues.values,
             'p_value': model.pvalues.values,
             'ci_low_95': ci.iloc[:, 0].values,
@@ -382,6 +456,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--include-country-fe', dest='include_country_fe', action='store_true')
     parser.add_argument('--no-country-fe', dest='include_country_fe', action='store_false')
     parser.set_defaults(include_country_fe=True)
+    parser.add_argument('--cov-type', choices=sorted(SUPPORTED_COV_TYPES), default='hc3')
     parser.add_argument(
         '--regressand',
         choices=[
@@ -428,6 +503,7 @@ def main() -> None:
         cpi_lags=args.cpi_lags,
         include_country_fe=args.include_country_fe,
         regressand=args.regressand,
+        cov_type=args.cov_type,
     )
     paths = save_outputs(reg_df, coef_df, model, args.out_dir)
 
@@ -441,6 +517,7 @@ def main() -> None:
     print(f'oil_path: {oil_path}')
     print(f'cpi_lags: {args.cpi_lags}')
     print(f'include_country_fe: {args.include_country_fe}')
+    print(f'cov_type: {args.cov_type}')
     print(f'regressand: {args.regressand}')
     print(f'exclude_argentina: {args.exclude_argentina}')
     for label, path in paths.items():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,41 @@ def _resolve_variant(cfg: dict[str, Any], variant: str | None) -> str:
     return "extended" if cfg["icio"].get("extended", False) else "regular"
 
 
+def _extract_year(filename: str) -> int | None:
+    match = re.search(r"(19\d{2}|20\d{2})", filename)
+    return int(match.group(1)) if match else None
+
+
+def _raw_file_for_year(raw_dir: Path, year: int) -> Path | None:
+    for file_path in sorted(raw_dir.glob("*.csv")):
+        if _extract_year(file_path.name) == year:
+            return file_path
+    return None
+
+
+def _load_country_hfce_proxy(raw_file: Path, country: str) -> pd.DataFrame:
+    hfce_col = f"{country}_HFCE"
+    header = pd.read_csv(raw_file, nrows=0).columns.tolist()
+    if hfce_col not in header:
+        return pd.DataFrame(columns=["label", "hfce_proxy"])
+
+    frame = pd.read_csv(raw_file, usecols=["V1", hfce_col]).rename(columns={"V1": "label"})
+    frame["hfce_proxy"] = pd.to_numeric(frame[hfce_col], errors="coerce").fillna(0.0).clip(lower=0.0)
+    return frame[["label", "hfce_proxy"]]
+
+
+def _load_all_countries_hfce_proxy(raw_file: Path) -> pd.DataFrame:
+    header = pd.read_csv(raw_file, nrows=0).columns.tolist()
+    hfce_cols = [col for col in header if col.endswith("_HFCE")]
+    if not hfce_cols:
+        return pd.DataFrame(columns=["label", "hfce_proxy"])
+
+    frame = pd.read_csv(raw_file, usecols=["V1", *hfce_cols]).rename(columns={"V1": "label"})
+    hfce_values = frame[hfce_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).clip(lower=0.0)
+    frame["hfce_proxy"] = hfce_values.sum(axis=1)
+    return frame[["label", "hfce_proxy"]]
+
+
 def _country_from_label(label: str) -> str:
     if "_" not in label:
         return ""
@@ -89,9 +125,9 @@ def _sector_bucket(sector_code: str) -> str:
     lead = sector_code[0]
     if lead == "A":
         return "Agriculture"
-    if lead in {"B", "C", "D", "E", "F"}:
+    if lead in {"B", "C"}:
         return "Manufacturing"
-    if lead in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T"}:
+    if lead in {"D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T"}:
         return "Services"
     return "Other"
 
@@ -164,7 +200,7 @@ def prepare_country_bubble_data(
 ) -> pd.DataFrame:
     """Return country-year sector rows for bubble plotting of tau metrics.
 
-    Bubble size uses sector output (OUT) from A metadata as a GDP proxy.
+    Bubble size uses sector HFCE expenditure for the selected country-year.
     """
     country = country.upper()
     use_variant = _resolve_variant(cfg, variant)
@@ -172,14 +208,18 @@ def prepare_country_bubble_data(
 
     blocks_dir = paths["matrices"] / "blocks" / use_variant
     a_dir = paths["matrices"] / "A" / use_variant
+    raw_dir = paths["raw"] / use_variant
     ref_dir = Path("data/reference")
 
     blocks_npz = blocks_dir / f"blocks_{year}.npz"
     blocks_meta = blocks_dir / f"blocks_{year}_meta.parquet"
     a_meta = a_dir / f"A_{year}_meta.parquet"
+    raw_file = _raw_file_for_year(raw_dir, year)
 
     if not a_meta.exists():
         raise FileNotFoundError(f"Missing A metadata file: {a_meta}")
+    if raw_file is None:
+        raise FileNotFoundError(f"Missing raw ICIO file for year {year} in {raw_dir}")
 
     n_meta, metric_col, tau_values, tau_amp_tail = _load_tau_arrays(blocks_npz, blocks_meta, metric)
     labels_n = n_meta["label"].astype(str).tolist()
@@ -204,6 +244,10 @@ def prepare_country_bubble_data(
     )
     df = df.merge(a_meta_df, on="label", how="left")
     df["out_proxy"] = pd.to_numeric(df["out_proxy"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    hfce_proxy_df = _load_country_hfce_proxy(raw_file, country)
+    df = df.merge(hfce_proxy_df, on="label", how="left")
+    df["hfce_proxy"] = pd.to_numeric(df["hfce_proxy"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    df["bubble_size_proxy"] = df["hfce_proxy"]
 
     sector_ref = _load_sector_reference(ref_dir / "sector_codes.csv")
     country_ref = _load_reference_table(
@@ -231,12 +275,12 @@ def prepare_country_bubble_data(
     df["x"] = np.arange(len(df), dtype=float)
 
     # Bubble-size helper columns for notebook plotting.
-    max_out = float(df["out_proxy"].max())
-    if max_out > 0:
-        df["bubble_size_norm"] = df["out_proxy"] / max_out
+    max_proxy = float(df["bubble_size_proxy"].max())
+    if max_proxy > 0:
+        df["bubble_size_norm"] = df["bubble_size_proxy"] / max_proxy
     else:
         df["bubble_size_norm"] = 0.0
-    df["bubble_size"] = 100.0 + 1400.0 * df["bubble_size_norm"]
+    df["bubble_size"] = 100.0 + 1900.0 * df["bubble_size_norm"]
 
     df["year"] = int(year)
     df["variant"] = use_variant
@@ -261,11 +305,13 @@ def prepare_all_countries_bubble_data(
 
     blocks_dir = paths["matrices"] / "blocks" / use_variant
     a_dir = paths["matrices"] / "A" / use_variant
+    raw_dir = paths["raw"] / use_variant
     ref_dir = Path("data/reference")
 
     blocks_npz = blocks_dir / f"blocks_{year}.npz"
     blocks_meta = blocks_dir / f"blocks_{year}_meta.parquet"
     a_meta = a_dir / f"A_{year}_meta.parquet"
+    raw_file = _raw_file_for_year(raw_dir, year)
 
     n_meta, metric_col, tau_values, tau_amp_tail = _load_tau_arrays(blocks_npz, blocks_meta, metric)
 
@@ -307,6 +353,17 @@ def prepare_all_countries_bubble_data(
         )
     else:
         df["out_proxy"] = 0.0
+
+    if raw_file is not None:
+        hfce_proxy_df = _load_all_countries_hfce_proxy(raw_file)
+        df = df.merge(hfce_proxy_df, on="label", how="left")
+        df["hfce_proxy"] = (
+            pd.to_numeric(df["hfce_proxy"], errors="coerce")
+            .fillna(0.0)
+            .clip(lower=0.0)
+        )
+    else:
+        df["hfce_proxy"] = 0.0
 
     df["sector_bucket"] = df["sector_code"].map(_sector_bucket)
     bucket_order = {"Agriculture": 0, "Manufacturing": 1, "Services": 2, "Other": 3}
@@ -507,19 +564,8 @@ def plot_country_bubble(
 
     ax.set_xlabel("")
     ax.set_ylabel(metric_label, fontfamily="serif", fontsize=14)
-    if title:
+    if title is not None:
         ax.set_title(title, fontfamily="serif", fontsize=18)
-    else:
-        country = str(work["country_code"].iloc[0]) if len(work) else ""
-        country_name = (
-            str(work["country_name"].iloc[0])
-            if len(work) and "country_name" in work.columns
-            else ""
-        )
-        if not country_name or country_name.lower() == "nan":
-            country_name = country
-        year = int(work["year"].iloc[0]) if len(work) else 0
-        ax.set_title(f"{country_name} {year}: {metric_label}", fontfamily="serif")
 
     for tick in ax.get_yticklabels():
         tick.set_fontfamily("serif")
@@ -598,11 +644,8 @@ def plot_all_countries_bubble(
     metric_label = _metric_label(metric)
     ax.set_xlabel("")
     ax.set_ylabel(metric_label, fontfamily="serif", fontsize=14)
-    if title:
+    if title is not None:
         ax.set_title(title, fontfamily="serif", fontsize=17)
-    else:
-        year = int(plot["year"].iloc[0]) if len(plot) else 0
-        ax.set_title(f"All countries {year}: {metric_label}", fontfamily="serif", fontsize=17)
 
     for tick in ax.get_yticklabels():
         tick.set_fontfamily("serif")
@@ -641,6 +684,7 @@ def plot_all_countries_boxen(
 
     try:
         import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
         from matplotlib.ticker import FuncFormatter
     except ImportError as exc:  # pragma: no cover
         raise ImportError("matplotlib is required for plotting. Install it in your .venv.") from exc
@@ -1010,16 +1054,315 @@ def plot_all_countries_boxen(
             color=regression_color,
         )
 
-    if title:
+    if bucket_colors:
+        legend_order = ["Agriculture", "Manufacturing", "Services", "Other"]
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                color=bucket_colors[name],
+                marker="o",
+                linestyle="-",
+                linewidth=whisker_linewidth,
+                markersize=max(float(dot_size) ** 0.5 / 1.6, 5.0),
+                markerfacecolor=bucket_colors[name],
+                markeredgecolor="white",
+                label=name,
+            )
+            for name in legend_order
+            if name in bucket_colors
+        ]
+        if handles:
+            ax.legend(handles=handles, frameon=False, loc="best", prop={"family": "serif", "size": 10})
+
+    if title is not None:
         ax.set_title(title, fontfamily="serif", fontsize=17)
-    else:
-        year = int(plot["year"].iloc[0]) if len(plot) and "year" in plot.columns else 0
-        flavor = "Boxen" if used_seaborn else "Box"
-        ax.set_title(
-            f"All countries {year}: {metric_label} by {group_col} ({flavor})",
-            fontfamily="serif",
-            fontsize=17,
+
+    for tick in ax.get_yticklabels():
+        tick.set_fontfamily("serif")
+
+    return ax
+
+
+def plot_all_countries_dot_whisker(
+    df: pd.DataFrame,
+    metric: str,
+    title: str | None = None,
+    group_col: str = "sector_code",
+    bucket_col: str = "sector_bucket",
+    mark_buckets: bool = True,
+    yscale: str = "linear",
+    flip_axes: bool = False,
+    metric_clip_quantiles: tuple[float, float] | None = None,
+    metric_decimals: int = 6,
+    weighted: bool = False,
+    weight_col: str = "out_proxy",
+    sort_by: str = "group",
+    fit_median_regression: bool = False,
+    report_r2: bool = True,
+    regression_color: str = "#b22222",
+    point_color: str = "#1f4e79",
+    whisker_color: str = "#8fb7dd",
+    bucket_colors: dict[str, str] | None = None,
+    dot_size: float = 52.0,
+    whisker_linewidth: float = 2.0,
+    ax: Any = None,
+) -> Any:
+    """Plot group medians with interquantile whiskers for all-country metric data."""
+    if metric not in df.columns:
+        raise ValueError(f"metric column '{metric}' not in dataframe")
+    if group_col not in df.columns:
+        raise ValueError(f"group column '{group_col}' not in dataframe")
+    if weighted and weight_col not in df.columns:
+        raise ValueError(f"weight column '{weight_col}' not in dataframe")
+    if sort_by not in {"group", "median"}:
+        raise ValueError("sort_by must be one of {'group', 'median'}")
+
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+        from matplotlib.ticker import FuncFormatter
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("matplotlib is required for plotting. Install it in your .venv.") from exc
+
+    work = df.copy()
+    metric_values = pd.to_numeric(work[metric], errors="coerce")
+    valid_mask = np.isfinite(metric_values.to_numpy(dtype=float))
+    if yscale == "log":
+        valid_mask &= (metric_values.to_numpy(dtype=float) > 0.0)
+    valid_mask &= work[group_col].notna().to_numpy(dtype=bool)
+    if weighted:
+        weights = pd.to_numeric(work[weight_col], errors="coerce").to_numpy(dtype=float)
+        valid_mask &= np.isfinite(weights) & (weights > 0.0)
+    plot = work.loc[valid_mask].copy().reset_index(drop=True)
+    if plot.empty:
+        raise ValueError(f"No finite data available to plot for metric '{metric}'.")
+
+    stats = []
+    for grp, sub in plot.groupby(group_col, sort=False):
+        vals = pd.to_numeric(sub[metric], errors="coerce").to_numpy(dtype=float)
+        bucket = (
+            sub[bucket_col].dropna().astype(str).iloc[0]
+            if bucket_col in sub.columns and sub[bucket_col].notna().any()
+            else ""
         )
+        x_base = (
+            float(pd.to_numeric(sub["x_base"], errors="coerce").dropna().iloc[0])
+            if "x_base" in sub.columns and pd.to_numeric(sub["x_base"], errors="coerce").notna().any()
+            else float("nan")
+        )
+        if weighted:
+            w = pd.to_numeric(sub[weight_col], errors="coerce").to_numpy(dtype=float)
+            mask = np.isfinite(vals) & np.isfinite(w) & (w > 0.0)
+            vals = vals[mask]
+            w = w[mask]
+            if len(vals) == 0:
+                continue
+            q10 = _weighted_quantile(vals, w, 0.10)
+            q25 = _weighted_quantile(vals, w, 0.25)
+            q50 = _weighted_quantile(vals, w, 0.50)
+            q75 = _weighted_quantile(vals, w, 0.75)
+            q90 = _weighted_quantile(vals, w, 0.90)
+        else:
+            vals = vals[np.isfinite(vals)]
+            if len(vals) == 0:
+                continue
+            q10, q25, q50, q75, q90 = np.quantile(vals, [0.10, 0.25, 0.50, 0.75, 0.90])
+
+        stats.append(
+            {
+                "label": str(grp),
+                "bucket": bucket,
+                "x_base": x_base,
+                "q10": float(q10),
+                "q25": float(q25),
+                "q50": float(q50),
+                "q75": float(q75),
+                "q90": float(q90),
+            }
+        )
+
+    if not stats:
+        raise ValueError(f"No non-empty groups available to plot for metric '{metric}'.")
+
+    stats_df = pd.DataFrame(stats)
+    if sort_by == "median":
+        stats_df = stats_df.sort_values(["q50", "label"], ascending=[False, True]).reset_index(drop=True)
+    elif stats_df["x_base"].notna().any():
+        stats_df = stats_df.sort_values(["x_base", "label"]).reset_index(drop=True)
+    else:
+        stats_df = stats_df.sort_values(["label"]).reset_index(drop=True)
+
+    stats_df["position"] = np.arange(len(stats_df), dtype=float)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(14, 7))
+
+    for row in stats_df.itertuples(index=False):
+        pos = float(row.position)
+        row_color = point_color
+        if bucket_colors is not None:
+            row_color = bucket_colors.get(str(row.bucket), row_color)
+        if flip_axes:
+            ax.hlines(pos, row.q25, row.q75, color=row_color, linewidth=whisker_linewidth, zorder=3)
+            ax.scatter(row.q50, pos, s=dot_size, color=row_color, edgecolors="white", linewidths=0.8, zorder=4)
+        else:
+            ax.vlines(pos, row.q25, row.q75, color=row_color, linewidth=whisker_linewidth, zorder=3)
+            ax.scatter(pos, row.q50, s=dot_size, color=row_color, edgecolors="white", linewidths=0.8, zorder=4)
+
+    median_positions = stats_df["position"].to_numpy(dtype=float)
+    median_values = stats_df["q50"].to_numpy(dtype=float)
+
+    if flip_axes:
+        ax.set_yticks(stats_df["position"])
+        ax.set_yticklabels(stats_df["label"], fontfamily="serif", fontsize=11)
+    else:
+        ax.set_xticks(stats_df["position"])
+        ax.set_xticklabels(stats_df["label"], fontfamily="serif", fontsize=11)
+
+    metric_label = _metric_label(metric)
+    if flip_axes:
+        ax.set_xlabel(metric_label, fontfamily="serif", fontsize=14)
+        ax.set_ylabel("")
+        ax.set_xscale(yscale)
+        if group_col in {"sector_code", "sector_abbreviation"}:
+            for tick in ax.get_yticklabels():
+                tick.set_fontfamily("serif")
+                tick.set_fontsize(9)
+    else:
+        ax.set_xlabel("")
+        ax.set_ylabel(metric_label, fontfamily="serif", fontsize=14)
+        ax.set_yscale(yscale)
+        if group_col in {"sector_code", "sector_abbreviation"}:
+            ax.tick_params(axis="x", labelrotation=90)
+            for tick in ax.get_xticklabels():
+                tick.set_fontfamily("serif")
+                tick.set_fontsize(9)
+
+    def _plain_number(x: float, _pos: int) -> str:
+        text = f"{x:.{int(metric_decimals)}f}"
+        text = text.rstrip("0").rstrip(".")
+        return "0" if text in {"-0", ""} else text
+
+    if flip_axes:
+        ax.xaxis.set_major_formatter(FuncFormatter(_plain_number))
+    else:
+        ax.yaxis.set_major_formatter(FuncFormatter(_plain_number))
+
+    if metric_clip_quantiles is not None:
+        q_lo, q_hi = metric_clip_quantiles
+        q_lo = float(q_lo)
+        q_hi = float(q_hi)
+        if not (0.0 <= q_lo < q_hi <= 1.0):
+            raise ValueError("metric_clip_quantiles must satisfy 0 <= q_lo < q_hi <= 1.")
+        clip_vals = pd.to_numeric(plot[metric], errors="coerce").to_numpy(dtype=float)
+        clip_vals = clip_vals[np.isfinite(clip_vals)]
+        if yscale == "log":
+            clip_vals = clip_vals[clip_vals > 0.0]
+        if len(clip_vals) > 0:
+            lo = float(np.quantile(clip_vals, q_lo))
+            hi = float(np.quantile(clip_vals, q_hi))
+            if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                if flip_axes:
+                    ax.set_xlim(lo, hi)
+                else:
+                    ax.set_ylim(lo, hi)
+
+    if mark_buckets and "bucket" in stats_df.columns:
+        buckets = stats_df["bucket"].fillna("").astype(str).tolist()
+        start = 0
+        segments: list[tuple[str, int, int]] = []
+        for i in range(1, len(buckets) + 1):
+            if i == len(buckets) or buckets[i] != buckets[i - 1]:
+                segments.append((buckets[start], start, i - 1))
+                start = i
+
+        for _, _, end in segments[:-1]:
+            if flip_axes:
+                ax.axhline(float(end) + 0.5, linestyle=":", linewidth=1.0, alpha=0.8, color="0.35")
+            else:
+                ax.axvline(float(end) + 0.5, linestyle=":", linewidth=1.0, alpha=0.8, color="0.35")
+
+    r2 = float("nan")
+    med_pos = np.asarray(median_positions, dtype=float)
+    med_val = np.asarray(median_values, dtype=float)
+    med_mask = np.isfinite(med_pos) & np.isfinite(med_val)
+    med_pos = med_pos[med_mask]
+    med_val = med_val[med_mask]
+    if fit_median_regression and len(med_pos) >= 2:
+        if yscale == "log":
+            transform_mask = med_val > 0
+            med_pos_fit = med_pos[transform_mask]
+            med_val_fit = med_val[transform_mask]
+            if len(med_pos_fit) >= 2:
+                y_fit = np.log10(med_val_fit)
+                coefs = np.polyfit(med_pos_fit, y_fit, 1)
+                y_hat = np.polyval(coefs, med_pos_fit)
+                ss_res = float(np.sum((y_fit - y_hat) ** 2))
+                ss_tot = float(np.sum((y_fit - np.mean(y_fit)) ** 2))
+                r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
+                med_grid = np.linspace(med_pos_fit.min(), med_pos_fit.max(), 200)
+                pred = 10.0 ** np.polyval(coefs, med_grid)
+                if flip_axes:
+                    ax.plot(pred, med_grid, color=regression_color, linewidth=1.8, zorder=4)
+                else:
+                    ax.plot(med_grid, pred, color=regression_color, linewidth=1.8, zorder=4)
+        else:
+            coefs = np.polyfit(med_pos, med_val, 1)
+            y_hat = np.polyval(coefs, med_pos)
+            ss_res = float(np.sum((med_val - y_hat) ** 2))
+            ss_tot = float(np.sum((med_val - np.mean(med_val)) ** 2))
+            r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
+            med_grid = np.linspace(med_pos.min(), med_pos.max(), 200)
+            pred = np.polyval(coefs, med_grid)
+            if flip_axes:
+                ax.plot(pred, med_grid, color=regression_color, linewidth=1.8, zorder=4)
+            else:
+                ax.plot(med_grid, pred, color=regression_color, linewidth=1.8, zorder=4)
+
+    ax._median_regression_r2 = r2
+    ax._dot_whisker_stats = stats_df.copy()
+    if report_r2 and np.isfinite(r2):
+        ax.text(
+            0.99,
+            0.98,
+            f"$R^2={r2:.3f}$",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=10,
+            fontfamily="serif",
+            color=regression_color,
+        )
+
+    if bucket_colors:
+        legend_order = ["Agriculture", "Manufacturing", "Services", "Other"]
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                color=bucket_colors[name],
+                marker="o",
+                linestyle="-",
+                linewidth=whisker_linewidth,
+                markersize=max(float(dot_size) ** 0.5 / 1.6, 5.0),
+                markerfacecolor=bucket_colors[name],
+                markeredgecolor="white",
+                label=name,
+            )
+            for name in legend_order
+            if name in bucket_colors
+        ]
+        if handles:
+            ax.legend(
+                handles=handles,
+                frameon=False,
+                loc="upper right",
+                prop={"family": "serif", "size": 10},
+            )
+
+    if title is not None:
+        ax.set_title(title, fontfamily="serif", fontsize=17)
 
     for tick in ax.get_yticklabels():
         tick.set_fontfamily("serif")

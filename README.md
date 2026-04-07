@@ -212,7 +212,18 @@ Stored arrays include:
 
 ### `build-xi`
 
-Aggregates sector-level `tau` objects to country-year `xi` measures using HFCE weights.
+Aggregates sector-level `tau` objects and exogenous-sector `lambda` weights to country-year
+`xi` measures using HFCE weights normalized over all sectors within a country-year.
+
+For each country-year, let `w_N` be normalized HFCE weights on non-exogenous sectors and `w_E`
+be normalized HFCE weights on exogenous sectors, such that their entries sum to 1 jointly across
+all sectors. Then the builder computes:
+
+- `xi_dir = w_E' lambda`
+- `xi_amp_1 = w_N' tau_dir`
+- `xi_amp_2 = w_N' tau_amp`
+- `xi_amp = xi_amp_1 + xi_amp_2 = w_N' tau`
+- `xi = xi_dir + xi_amp`
 
 Outputs under `data/processed/xi/<variant>`:
 - `xi_by_country_year.parquet`
@@ -224,8 +235,10 @@ Important output fields include:
 - `country`
 - `year`
 - `xi`
-- `xi_dir`
-- `xi_amp`
+- `xi_dir` (exogenous-sector contribution, `w_E' lambda`)
+- `xi_amp_1` (direct non-exogenous contribution, `w_N' tau_dir`)
+- `xi_amp_2` (amplification-tail contribution, `w_N' tau_amp`)
+- `xi_amp` (non-exogenous-sector contribution, `w_N' tau`)
 - `identity_residual`
 - `status`
 - build timestamp and git commit metadata
@@ -414,6 +427,7 @@ Useful flags:
 - `--oil-path`
 - `--cpi-lags`
 - `--include-country-fe` / `--no-country-fe`
+- `--cov-type` (`hc3`, `cluster_country`, or `cluster_country_time`)
 - `--regressand`
 - `--exclude-argentina`
 - `--out-dir`
@@ -430,7 +444,7 @@ Default regression outputs are written under `outputs/regression`:
 - building panel LP datasets from `xi`, CPI, oil, and optional controls
 - annual and quarterly panels
 - horizon-by-horizon local projections with country and year or time fixed effects
-- clustered-by-country or `HC3` inference
+- `HC3`, clustered-by-country, or two-way clustered-by-country-and-time inference
 - cumulative quarterly CPI targets
 - horizon-0 comparisons against the OLS implementation
 - impulse-response plotting
