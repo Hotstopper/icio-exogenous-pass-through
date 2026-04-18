@@ -485,6 +485,7 @@ Current notebooks include:
 - `panel_local_projections.ipynb`
 - `panel_cumulative_local_projections.ipynb`
 - `panel_cumulative_local_projections_oil2.ipynb`
+- `panel_cumulative_local_projections_oil2_euro.ipynb`
 - `panel_cumulative_local_projections_iv_oil2.ipynb`
 - `tau_bubble_chart.ipynb`
 - `tau_bubble_all_countries.ipynb`

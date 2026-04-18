@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import sys
+import warnings
 from pathlib import Path
 import shutil
 import uuid
 
+import numpy as np
 import pandas as pd
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -19,7 +21,31 @@ from io_networks.local_projections import (
     fit_panel_local_projections_iv,
 )
 from io_networks.local_projections import compare_horizon0_to_run_ols
-from io_networks.regression import run_ols
+from io_networks.regression import extract_inference_arrays, run_ols
+
+
+class _DummyInferenceModel:
+    def __init__(self) -> None:
+        self.params = pd.Series([1.0, -2.0], index=["a", "b"])
+        self.use_t = False
+        self.df_resid = 10.0
+
+    def cov_params(self) -> np.ndarray:
+        return np.array([[4.0, 0.0], [0.0, -1.0]])
+
+
+def test_extract_inference_arrays_silences_negative_covariance_diagonal_warning():
+    model = _DummyInferenceModel()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        inference = extract_inference_arrays(model)
+
+    assert caught == []
+    assert inference["std_err"][0] == 2.0
+    assert np.isnan(inference["std_err"][1])
+    assert np.isnan(inference["ci_low"][1])
+    assert np.isnan(inference["ci_high"][1])
 
 
 def test_build_panel_lp_dataset_merges_optional_controls():

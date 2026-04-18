@@ -389,6 +389,84 @@ def plot_xi_composition_map(
     except ImportError as exc:  # pragma: no cover
         raise ImportError("matplotlib is required for plotting. Install it in your .venv.") from exc
 
+    def _boxes_overlap(box_a: tuple[float, float, float, float], box_b: tuple[float, float, float, float]) -> bool:
+        ax0, ay0, ax1, ay1 = box_a
+        bx0, by0, bx1, by1 = box_b
+        return not (ax1 < bx0 or bx1 < ax0 or ay1 < by0 or by1 < ay0)
+
+    def _choose_label_position(
+        x: float,
+        y: float,
+        text: str,
+        *,
+        fontsize: float,
+        dx_pts: float,
+        dy_pts: float,
+        used_boxes: list[tuple[float, float, float, float]],
+    ) -> tuple[float, float, str, str, tuple[float, float, float, float]]:
+        fig = ax.figure
+        point_px = fig.dpi / 72.0
+        x_disp, y_disp = ax.transData.transform((x, y))
+        text_width = max(18.0, (0.62 * fontsize * len(text) + 8.0) * point_px)
+        text_height = (1.35 * fontsize + 6.0) * point_px
+        pad_x = 4.0 * point_px
+        pad_y = 2.0 * point_px
+        axes_box = ax.get_window_extent()
+        candidate_specs = [
+            (dx_pts, dy_pts, "left", "center"),
+            (dx_pts, dy_pts * 2.1, "left", "bottom"),
+            (dx_pts, -dy_pts * 2.1, "left", "top"),
+            (-dx_pts, dy_pts, "right", "center"),
+            (-dx_pts, dy_pts * 2.1, "right", "bottom"),
+            (-dx_pts, -dy_pts * 2.1, "right", "top"),
+            (dx_pts * 0.45, dy_pts * 3.0, "left", "bottom"),
+            (dx_pts * 0.45, -dy_pts * 3.0, "left", "top"),
+            (-dx_pts * 0.45, dy_pts * 3.0, "right", "bottom"),
+            (-dx_pts * 0.45, -dy_pts * 3.0, "right", "top"),
+        ]
+
+        best_choice: tuple[float, float, str, str, tuple[float, float, float, float]] | None = None
+        best_penalty: tuple[int, float] | None = None
+
+        for cand_dx, cand_dy, ha, va in candidate_specs:
+            text_x = x_disp + cand_dx * point_px
+            text_y = y_disp + cand_dy * point_px
+            if ha == "left":
+                x0 = text_x - pad_x
+                x1 = text_x + text_width + pad_x
+            else:
+                x0 = text_x - text_width - pad_x
+                x1 = text_x + pad_x
+            if va == "center":
+                y0 = text_y - text_height / 2.0 - pad_y
+                y1 = text_y + text_height / 2.0 + pad_y
+            elif va == "bottom":
+                y0 = text_y - pad_y
+                y1 = text_y + text_height + pad_y
+            else:
+                y0 = text_y - text_height - pad_y
+                y1 = text_y + pad_y
+            box = (x0, y0, x1, y1)
+
+            overlap_count = sum(1 for other in used_boxes if _boxes_overlap(box, other))
+            outside_penalty = (
+                max(0.0, axes_box.x0 - x0)
+                + max(0.0, x1 - axes_box.x1)
+                + max(0.0, axes_box.y0 - y0)
+                + max(0.0, y1 - axes_box.y1)
+            )
+            distance_penalty = abs(cand_dx) + abs(cand_dy)
+            penalty = (overlap_count + int(outside_penalty > 0.0) * 1000, outside_penalty + distance_penalty)
+
+            if best_penalty is None or penalty < best_penalty:
+                best_penalty = penalty
+                best_choice = (cand_dx, cand_dy, ha, va, box)
+                if overlap_count == 0 and outside_penalty == 0.0:
+                    break
+
+        assert best_choice is not None
+        return best_choice
+
     work = _prepare_xi_ratio_frame(
         df=df,
         ratio_mode=ratio_mode,
@@ -444,6 +522,7 @@ def plot_xi_composition_map(
 
     cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0", "C1", "C2", "C3", "C4"])
     hi_color_map = {str(country).upper(): color for country, color in (highlight_colors or {}).items()}
+    used_label_boxes: list[tuple[float, float, float, float]] = []
 
     if group_map:
         grouped = plot[plot["country"].isin(group_map)].copy()
@@ -512,13 +591,22 @@ def plot_xi_composition_map(
                     continue
                 x = float(sub["xi"].iloc[0])
                 y = float(sub["ratio"].iloc[0])
+                ann_dx, ann_dy, ann_ha, ann_va, ann_box = _choose_label_position(
+                    x,
+                    y,
+                    country,
+                    fontsize=highlight_label_fontsize,
+                    dx_pts=label_dx_pts,
+                    dy_pts=label_dy_pts,
+                    used_boxes=used_label_boxes,
+                )
                 ax.annotate(
                     country,
                     xy=(x, y),
-                    xytext=(label_dx_pts, label_dy_pts),
+                    xytext=(ann_dx, ann_dy),
                     textcoords="offset points",
-                    ha="left",
-                    va="center",
+                    ha=ann_ha,
+                    va=ann_va,
                     fontsize=highlight_label_fontsize,
                     fontfamily="serif",
                     bbox={
@@ -529,6 +617,7 @@ def plot_xi_composition_map(
                     },
                     zorder=5,
                 )
+                used_label_boxes.append(ann_box)
     else:
         if not bg.empty:
             ax.scatter(
@@ -559,13 +648,22 @@ def plot_xi_composition_map(
                     edgecolors="none",
                     zorder=4,
                 )
+                ann_dx, ann_dy, ann_ha, ann_va, ann_box = _choose_label_position(
+                    x,
+                    y,
+                    country,
+                    fontsize=highlight_label_fontsize,
+                    dx_pts=label_dx_pts,
+                    dy_pts=label_dy_pts,
+                    used_boxes=used_label_boxes,
+                )
                 ax.annotate(
                     country,
                     xy=(x, y),
-                    xytext=(label_dx_pts, label_dy_pts),
+                    xytext=(ann_dx, ann_dy),
                     textcoords="offset points",
-                    ha="left",
-                    va="center",
+                    ha=ann_ha,
+                    va=ann_va,
                     fontsize=highlight_label_fontsize,
                     fontfamily="serif",
                     bbox={
@@ -576,6 +674,7 @@ def plot_xi_composition_map(
                     },
                     zorder=5,
                 )
+                used_label_boxes.append(ann_box)
 
     ax.grid(alpha=0.25, linewidth=0.8)
     ax.set_xlabel(_metric_label("xi"), fontfamily="serif")

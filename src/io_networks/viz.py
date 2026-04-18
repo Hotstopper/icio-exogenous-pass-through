@@ -442,7 +442,7 @@ def plot_country_bubble(
             zorder=1,
         )
 
-    ax.scatter(plot["x"], plot[metric], s=plot["bubble_size"], alpha=0.55)
+    ax.scatter(plot["x"], plot[metric], s=plot["bubble_size"], color="#8eb8e5", alpha=0.7)
 
     # Label placement: keep text close to own bubble, avoid other bubbles and prior labels.
     if label_top_n > 0:

@@ -1,10 +1,12 @@
 ﻿from __future__ import annotations
 
 import argparse
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 import statsmodels.api as sm
 
 
@@ -20,6 +22,39 @@ OIL_DEFAULT_BY_FREQ: dict[str, Path] = {
 }
 
 SUPPORTED_COV_TYPES = {'hc3', 'cluster_country', 'cluster_country_time'}
+
+
+def extract_inference_arrays(model, *, alpha: float = 0.05) -> dict[str, np.ndarray]:
+    params = np.asarray(model.params, dtype=float)
+    cov = np.asarray(model.cov_params(), dtype=float)
+    cov_diag = np.diag(cov)
+    std_err = np.full(params.shape, np.nan, dtype=float)
+    valid_var = np.isfinite(cov_diag) & (cov_diag >= 0.0)
+    std_err[valid_var] = np.sqrt(cov_diag[valid_var])
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        tvalues = params / std_err
+
+    use_t = bool(getattr(model, 'use_t', False))
+    if use_t:
+        df_resid = float(getattr(model, 'df_resid', np.nan))
+        pvalues = 2.0 * stats.t.sf(np.abs(tvalues), df=df_resid)
+        critical_value = float(stats.t.ppf(1.0 - alpha / 2.0, df=df_resid))
+    else:
+        pvalues = 2.0 * stats.norm.sf(np.abs(tvalues))
+        critical_value = float(stats.norm.ppf(1.0 - alpha / 2.0))
+
+    ci_low = params - critical_value * std_err
+    ci_high = params + critical_value * std_err
+
+    return {
+        'params': params,
+        'std_err': std_err,
+        'tvalues': tvalues,
+        'pvalues': pvalues,
+        'ci_low': ci_low,
+        'ci_high': ci_high,
+    }
 
 
 def _validate_cluster_design(
@@ -93,9 +128,12 @@ def load_xi(path: Path) -> pd.DataFrame:
     if missing:
         raise ValueError(f'Missing xi columns: {sorted(missing)}')
 
-    df = df.loc[df['status'] == 'ok', ['year', 'country', 'xi']].copy()
+    optional_cols = [col for col in ['xi_amp_1', 'xi_amp_2', 'xi_amp'] if col in df.columns]
+    df = df.loc[df['status'] == 'ok', ['year', 'country', 'xi', *optional_cols]].copy()
     df['year'] = pd.to_numeric(df['year'], errors='coerce')
     df['xi'] = pd.to_numeric(df['xi'], errors='coerce')
+    for col in optional_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
     df = df.dropna(subset=['year', 'country', 'xi'])
     df['year'] = df['year'].astype(int)
     return df
@@ -389,16 +427,16 @@ def run_ols(
         time_col='year',
     )
 
-    ci = model.conf_int()
+    inference = extract_inference_arrays(model)
     coef = pd.DataFrame(
         {
             'term': model.params.index,
-            'coef': model.params.values,
-            std_err_col: model.bse.values,
-            't': model.tvalues.values,
-            'p_value': model.pvalues.values,
-            'ci_low_95': ci.iloc[:, 0].values,
-            'ci_high_95': ci.iloc[:, 1].values,
+            'coef': inference['params'],
+            std_err_col: inference['std_err'],
+            't': inference['tvalues'],
+            'p_value': inference['pvalues'],
+            'ci_low_95': inference['ci_low'],
+            'ci_high_95': inference['ci_high'],
         }
     )
     return model, coef
@@ -419,7 +457,9 @@ def save_outputs(
 
     df.to_csv(merged_path, index=False)
     coef_df.to_csv(coef_path, index=False)
-    summary_path.write_text(model.summary().as_text(), encoding='utf-8')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        summary_path.write_text(model.summary().as_text(), encoding='utf-8')
 
     metrics = pd.DataFrame(
         [

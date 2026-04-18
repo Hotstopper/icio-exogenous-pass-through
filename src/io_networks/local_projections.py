@@ -242,6 +242,7 @@ def build_panel_lp_dataset(
     if not collapse_to_yearly:
         keep_cols.extend(["period", "time_index"])
     keep_cols.extend(["xi", "oil_pct_change", "xi_x_oil", "cpi_pct_change"])
+    keep_cols.extend([col for col in ["xi_amp_1", "xi_amp_2", "xi_amp"] if col in panel.columns])
     if news_df is not None:
         keep_cols.extend(["news", "xi_x_news"])
     for spec in controls or []:
@@ -251,6 +252,24 @@ def build_panel_lp_dataset(
     panel = panel[keep_cols].sort_values(sort_cols).reset_index(drop=True)
     _validate_unique_keys(panel, keys=panel_keys, label="Panel LP dataset")
     return panel
+
+
+def _resolve_contemporaneous_controls(
+    controls: list[str],
+    include_contemporaneous_controls: bool | list[str],
+) -> list[str]:
+    if isinstance(include_contemporaneous_controls, bool):
+        return list(controls) if include_contemporaneous_controls else []
+
+    requested = list(include_contemporaneous_controls)
+    missing = [control for control in requested if control not in controls]
+    if missing:
+        raise ValueError(
+            "Contemporaneous controls must also be listed in controls. "
+            f"Missing from controls: {sorted(set(missing))}"
+        )
+    requested_set = set(requested)
+    return [control for control in controls if control in requested_set]
 
 
 def _build_lagged_columns(
@@ -263,6 +282,7 @@ def _build_lagged_columns(
     y_lags: int,
     controls: list[str],
     control_lags: int | dict[str, int],
+    include_contemporaneous_controls: bool | list[str] = False,
     instrument_col: str | None = None,
 ) -> tuple[pd.DataFrame, list[str], list[str], list[str], list[str]]:
     y_lag_cols: list[str] = []
@@ -282,7 +302,10 @@ def _build_lagged_columns(
             work[instrument_lag_col] = work.groupby(group_col)[instrument_col].shift(lag)
             instrument_lag_cols.append(instrument_lag_col)
 
-    control_cols: list[str] = []
+    control_cols: list[str] = _resolve_contemporaneous_controls(
+        controls,
+        include_contemporaneous_controls,
+    )
     for control in controls:
         lag_count = control_lags[control] if isinstance(control_lags, dict) else int(control_lags)
         if lag_count < 0:
@@ -341,6 +364,22 @@ def _build_fe_design(
 
     design = pd.concat([work[design_cols], x_base], axis=1).dropna().reset_index(drop=True)
     return design, fe_cols
+
+
+def _coerce_lp_design_numeric(
+    design: pd.DataFrame,
+    *,
+    dep_col: str,
+    x_cols: list[str],
+) -> tuple[pd.Series, pd.DataFrame, pd.Series]:
+    y = pd.to_numeric(design[dep_col], errors="coerce")
+    x = design[x_cols].apply(pd.to_numeric, errors="coerce")
+    valid = y.notna() & x.notna().all(axis=1)
+    return (
+        y.loc[valid].reset_index(drop=True),
+        x.loc[valid].reset_index(drop=True),
+        valid,
+    )
 
 
 def _fit_lp_model_with_covariance(
@@ -415,17 +454,17 @@ def _summarize_model_results(
     term_names = list(getattr(model.params, "index", getattr(model.model, "exog_names", [])))
     if not term_names:
         raise ValueError("Could not determine parameter names from model results.")
-    ci = pd.DataFrame(model.conf_int())
+    inference = regression.extract_inference_arrays(model)
     coef_df = pd.DataFrame(
         {
             "horizon": horizon,
             "term": term_names,
-            "coef": list(model.params),
-            std_err_col: list(model.bse),
-            "t": list(model.tvalues),
-            "p_value": list(model.pvalues),
-            "ci_low_95": ci.iloc[:, 0].values,
-            "ci_high_95": ci.iloc[:, 1].values,
+            "coef": inference["params"],
+            std_err_col: inference["std_err"],
+            "t": inference["tvalues"],
+            "p_value": inference["pvalues"],
+            "ci_low_95": inference["ci_low"],
+            "ci_high_95": inference["ci_high"],
             "nobs": float(model.nobs),
         }
     )
@@ -570,6 +609,7 @@ def fit_panel_local_projections(
     shock_lags: int = 0,
     controls: list[str] | None = None,
     control_lags: int | dict[str, int] = 0,
+    include_contemporaneous_controls: bool | list[str] = False,
     include_country_fe: bool = True,
     include_year_fe: bool = True,
     cov_type: str = "cluster_country",
@@ -606,6 +646,7 @@ def fit_panel_local_projections(
         y_lags=y_lags,
         controls=controls,
         control_lags=control_lags,
+        include_contemporaneous_controls=include_contemporaneous_controls,
     )
 
     irf_rows: list[dict[str, Any]] = []
@@ -670,6 +711,8 @@ def fit_cumulative_panel_local_projections(
     shock_lags: int = 0,
     controls: list[str] | None = None,
     control_lags: int | dict[str, int] = 0,
+    include_contemporaneous_controls: bool | list[str] = False,
+    include_contemporaneous_shock: bool = True,
     include_country_fe: bool = True,
     include_time_fe: bool = True,
     cov_type: str = "cluster_country",
@@ -697,9 +740,15 @@ def fit_cumulative_panel_local_projections(
         y_lags=y_lags,
         controls=controls,
         control_lags=control_lags,
+        include_contemporaneous_controls=include_contemporaneous_controls,
     )
 
-    x_cols = [shock_col, *shock_lag_cols, *y_lag_cols, *control_cols]
+    if not include_contemporaneous_shock and not shock_lag_cols:
+        raise ValueError("include_contemporaneous_shock=False requires shock_lags >= 1.")
+
+    shock_terms = ([shock_col] if include_contemporaneous_shock else []) + shock_lag_cols
+    term_of_interest = shock_col if include_contemporaneous_shock else shock_lag_cols[0]
+    x_cols = [*shock_terms, *y_lag_cols, *control_cols]
     if common_sample:
         work = work.dropna(subset=[*x_cols, *target_cols]).reset_index(drop=True)
 
@@ -723,8 +772,13 @@ def fit_cumulative_panel_local_projections(
                 f"horizon={horizon}, y_lags={y_lags}, shock_lags={shock_lags}."
             )
 
-        y = pd.to_numeric(design[dep_col], errors="coerce")
-        x = sm.add_constant(design[x_cols + fe_cols], has_constant="add")
+        y, x_base, valid = _coerce_lp_design_numeric(
+            design,
+            dep_col=dep_col,
+            x_cols=x_cols + fe_cols,
+        )
+        design = design.loc[valid].reset_index(drop=True)
+        x = sm.add_constant(x_base, has_constant="add")
         base_model = sm.OLS(y, x, missing="raise")
         model, std_err_col = _fit_lp_model_with_covariance(
             base_model,
@@ -739,12 +793,129 @@ def fit_cumulative_panel_local_projections(
         coef_df, irf_row = _summarize_model_results(
             model,
             horizon=horizon,
-            term_of_interest=shock_col,
+            term_of_interest=term_of_interest,
             std_err_col=std_err_col,
             n_countries=int(design["country"].nunique()),
         )
         coef_rows.extend(coef_df.to_dict(orient="records"))
         irf_rows.append(irf_row)
+
+    return pd.DataFrame(irf_rows), pd.DataFrame(coef_rows), models
+
+
+def fit_cumulative_panel_local_projections_multi(
+    df: pd.DataFrame,
+    *,
+    y_col: str = "cpi_pct_change",
+    shock_cols: list[str],
+    horizons: int = 8,
+    y_lags: int = 4,
+    shock_lags: int = 0,
+    controls: list[str] | None = None,
+    control_lags: int | dict[str, int] = 0,
+    include_contemporaneous_controls: bool | list[str] = False,
+    include_country_fe: bool = True,
+    include_time_fe: bool = True,
+    cov_type: str = "cluster_country",
+    common_sample: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[int, Any]]:
+    if not shock_cols:
+        raise ValueError("shock_cols must contain at least one column.")
+
+    controls = controls or []
+    required = {"country", "time_index", y_col, *shock_cols, *controls}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing cumulative LP multi-shock columns: {sorted(missing)}")
+
+    target_cols = [f"cum_cpi_lead{h}" for h in range(horizons + 1)]
+    missing_targets = sorted(set(target_cols) - set(df.columns))
+    if missing_targets:
+        raise ValueError(f"Missing cumulative target columns: {missing_targets}")
+
+    work = df[["country", "time_index", "year", "period", y_col, *shock_cols, *controls, *target_cols]].copy()
+    work = work.sort_values(["country", "time_index"]).reset_index(drop=True)
+
+    y_lag_cols: list[str] = []
+    for lag in range(1, y_lags + 1):
+        col = f"{y_col}_lag{lag}"
+        work[col] = work.groupby("country")[y_col].shift(lag)
+        y_lag_cols.append(col)
+
+    shock_lag_cols: list[str] = []
+    for shock_col in shock_cols:
+        for lag in range(1, shock_lags + 1):
+            col = f"{shock_col}_lag{lag}"
+            work[col] = work.groupby("country")[shock_col].shift(lag)
+            shock_lag_cols.append(col)
+
+    control_cols: list[str] = _resolve_contemporaneous_controls(
+        controls,
+        include_contemporaneous_controls,
+    )
+    for control in controls:
+        lag_count = control_lags[control] if isinstance(control_lags, dict) else int(control_lags)
+        if lag_count < 0:
+            raise ValueError(f"Control lag count must be >= 0 for '{control}', got {lag_count}")
+        for lag in range(1, lag_count + 1):
+            col = f"{control}_lag{lag}"
+            work[col] = work.groupby("country")[control].shift(lag)
+            control_cols.append(col)
+
+    x_cols = [*shock_cols, *shock_lag_cols, *y_lag_cols, *control_cols]
+    if common_sample:
+        work = work.dropna(subset=[*x_cols, *target_cols]).reset_index(drop=True)
+
+    irf_rows: list[dict[str, Any]] = []
+    coef_rows: list[dict[str, Any]] = []
+    models: dict[int, Any] = {}
+
+    for horizon in range(horizons + 1):
+        dep_col = f"cum_cpi_lead{horizon}"
+        design, fe_cols = _build_fe_design(
+            work,
+            resolved_time_col="time_index",
+            include_country_fe=include_country_fe,
+            include_time_fe=include_time_fe,
+            x_cols=x_cols,
+            dep_col=dep_col,
+        )
+        if design.empty:
+            raise ValueError(
+                "No rows left for cumulative multi-shock local projections after target, lag, "
+                f"and missing-data filters. horizon={horizon}, y_lags={y_lags}, shock_lags={shock_lags}."
+            )
+
+        y, x_base, valid = _coerce_lp_design_numeric(
+            design,
+            dep_col=dep_col,
+            x_cols=x_cols + fe_cols,
+        )
+        design = design.loc[valid].reset_index(drop=True)
+        x = sm.add_constant(x_base, has_constant="add")
+        base_model = sm.OLS(y, x, missing="raise")
+        model, std_err_col = _fit_lp_model_with_covariance(
+            base_model,
+            design,
+            list(x.columns),
+            cov_type=cov_type,
+            time_col="time_index",
+            horizon=horizon,
+        )
+
+        models[horizon] = model
+        coef_df = pd.DataFrame()
+        for shock_col in shock_cols:
+            shock_coef_df, irf_row = _summarize_model_results(
+                model,
+                horizon=horizon,
+                term_of_interest=shock_col,
+                std_err_col=std_err_col,
+                n_countries=int(design["country"].nunique()),
+            )
+            coef_df = shock_coef_df
+            irf_rows.append(irf_row)
+        coef_rows.extend(coef_df.to_dict(orient="records"))
 
     return pd.DataFrame(irf_rows), pd.DataFrame(coef_rows), models
 
@@ -760,6 +931,7 @@ def fit_panel_local_projections_iv(
     shock_lags: int = 0,
     controls: list[str] | None = None,
     control_lags: int | dict[str, int] = 0,
+    include_contemporaneous_controls: bool | list[str] = False,
     include_country_fe: bool = True,
     include_year_fe: bool = True,
     cov_type: str = "cluster_country",
@@ -795,6 +967,7 @@ def fit_panel_local_projections_iv(
         y_lags=y_lags,
         controls=controls,
         control_lags=control_lags,
+        include_contemporaneous_controls=include_contemporaneous_controls,
         instrument_col=instrument_col,
     )
     work, dep_cols = _build_lead_columns(work, group_col="country", y_col=y_col, horizons=horizons)
@@ -866,6 +1039,7 @@ def fit_cumulative_panel_local_projections_iv(
     shock_lags: int = 0,
     controls: list[str] | None = None,
     control_lags: int | dict[str, int] = 0,
+    include_contemporaneous_controls: bool | list[str] = False,
     include_country_fe: bool = True,
     include_time_fe: bool = True,
     cov_type: str = "cluster_country",
@@ -893,6 +1067,7 @@ def fit_cumulative_panel_local_projections_iv(
         y_lags=y_lags,
         controls=controls,
         control_lags=control_lags,
+        include_contemporaneous_controls=include_contemporaneous_controls,
         instrument_col=instrument_col,
     )
 
@@ -1024,10 +1199,65 @@ def plot_irf(
         plot_df["horizon"],
         plot_df["ci_low_95"],
         plot_df["ci_high_95"],
-        alpha=0.2,
+        alpha=0.5,
+        color="#8eb8e5",
     )
     ax.axhline(0.0, color="black", linewidth=1)
     ax.set_xlabel("Horizon")
     ax.set_ylabel("Response of CPI")
     ax.set_title(title or "Panel local projections: CPI response to xi_x_oil")
+    return ax
+
+
+def plot_irf_multi(
+    irf_df: pd.DataFrame,
+    *,
+    title: str | None = None,
+    term_labels: dict[str, str] | None = None,
+    line_colors: dict[str, str] | None = None,
+    fill_colors: dict[str, str] | None = None,
+    fill_alpha: float = 0.5,
+    ax: Any = None,
+) -> Any:
+    required = {"horizon", "term", "coef", "ci_low_95", "ci_high_95"}
+    missing = required - set(irf_df.columns)
+    if missing:
+        raise ValueError(f"Multi-IRF plot requires columns: {sorted(required)}")
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(9, 5))
+
+    plot_df = irf_df.sort_values(["term", "horizon"]).reset_index(drop=True)
+    term_labels = term_labels or {}
+    line_colors = line_colors or {}
+    fill_colors = fill_colors or {}
+    colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+
+    for idx, term in enumerate(plot_df["term"].drop_duplicates()):
+        term_df = plot_df.loc[plot_df["term"] == term].sort_values("horizon")
+        default_color = colors[idx % len(colors)] if colors else None
+        line_color = line_colors.get(term, default_color)
+        fill_color = fill_colors.get(term, line_color)
+        label = term_labels.get(term, term)
+        ax.plot(
+            term_df["horizon"],
+            term_df["coef"],
+            marker="o",
+            linewidth=2,
+            label=label,
+            color=line_color,
+        )
+        ax.fill_between(
+            term_df["horizon"],
+            term_df["ci_low_95"],
+            term_df["ci_high_95"],
+            alpha=fill_alpha,
+            color=fill_color,
+        )
+
+    ax.axhline(0.0, color="black", linewidth=1)
+    ax.set_xlabel("Horizon")
+    ax.set_ylabel("Response of CPI")
+    ax.set_title(title or "Panel local projections: CPI response to decomposed xi x oil")
+    ax.legend(frameon=False)
     return ax
